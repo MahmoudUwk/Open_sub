@@ -2,7 +2,7 @@ import os
 import json
 import time
 
-from src.process_long_audio import process_audio_equal_segments
+from src.process_long_audio import process_audio_equal_segments, process_audio_fixed_duration
 
 
 DEFAULT_CONFIG_PATH = "config.json"
@@ -24,18 +24,23 @@ def run_from_config(config_path: str = DEFAULT_CONFIG_PATH) -> str:
     output_dir = cfg.get("output_dir", "output_srt")
     tmp_dir = cfg.get("tmp_dir", "tmp_segments")
     cleanup = bool(cfg.get("cleanup", True))
+    rate_limit_per_minute = int(cfg.get("rate_limit_per_minute", 10))
+    min_segment_minutes = int(cfg.get("min_segment_minutes", 5))
+    segment_overlap_seconds = int(cfg.get("segment_overlap_seconds", 2))
 
     if not os.path.exists(audio_path):
         raise FileNotFoundError(f"Input audio not found: {audio_path}")
 
-    # Always use equal 10-way (or num_calls) parallel pipeline
+    # Prefer fixed-duration pipeline respecting rate limits
     t0 = time.time()
-    out_path = process_audio_equal_segments(
+    out_path = process_audio_fixed_duration(
         input_audio=audio_path,
         source_language=source_language,
         target_language=target_language,
         model=model,
-        num_segments=num_segments,
+        min_segment_minutes=min_segment_minutes,
+        segment_overlap_seconds=segment_overlap_seconds,
+        rate_limit_per_minute=rate_limit_per_minute,
         tmp_dir=tmp_dir,
         output_dir=output_dir,
         cleanup=cleanup,

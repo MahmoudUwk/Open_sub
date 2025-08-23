@@ -216,3 +216,77 @@ def split_audio_into_equal_segments(
     return segment_paths, offsets_ms, total_ms
 
 
+def split_audio_by_duration(
+    input_audio: str,
+    segment_minutes: int,
+    overlap_seconds: int = 2,
+    tmp_dir: str = "tmp_segments",
+    verbose: bool = False,
+) -> Tuple[List[str], List[int], List[int], int]:
+    """Split audio into fixed-duration segments (>= segment_minutes) with optional overlap.
+
+    Returns (segment_paths, start_offsets_ms, segment_durations_ms, total_duration_ms).
+    Overlap is applied between consecutive segments; the last segment is not extended.
+    """
+    if segment_minutes <= 0:
+        raise ValueError("segment_minutes must be > 0")
+    if not os.path.exists(input_audio):
+        raise FileNotFoundError(f"Input audio not found: {input_audio}")
+
+    os.makedirs(tmp_dir, exist_ok=True)
+
+    total_ms_opt = get_audio_duration_ms(input_audio)
+    if total_ms_opt is None:
+        raise RuntimeError("Unable to determine audio duration for duration-based split")
+    total_ms = int(total_ms_opt)
+
+    # Enforce minimum 5 minutes per the user's requirement
+    min_minutes = max(5, int(segment_minutes))
+    segment_ms = min_minutes * 60 * 1000
+    overlap_ms = max(0, int(overlap_seconds) * 1000)
+
+    # Compute segment boundaries with overlap between consecutive chunks
+    boundaries: List[Tuple[int, int]] = []
+    start_ms = 0
+    while start_ms < total_ms:
+        end_ms = min(start_ms + segment_ms, total_ms)
+        if end_ms <= start_ms:
+            break
+        boundaries.append((start_ms, end_ms))
+        if end_ms >= total_ms:
+            break
+        # Next start overlaps by overlap_ms with previous end
+        start_ms = max(0, end_ms - overlap_ms)
+
+    segment_paths: List[str] = []
+    offsets_ms: List[int] = []
+    approx_durations_ms: List[int] = []
+
+    for i, (start_ms, end_ms) in enumerate(boundaries):
+        out_path = os.path.join(tmp_dir, f"seg_{i:02d}.m4a")
+        cmd = [
+            "ffmpeg", "-y", "-i", input_audio,
+            "-vn",
+            "-ss", format_seconds_for_ffmpeg(start_ms),
+            "-to", format_seconds_for_ffmpeg(end_ms),
+            "-ac", "1", "-ar", "16000",
+            "-c:a", "aac", "-b:a", "48k",
+            out_path,
+        ]
+        if verbose:
+            subprocess.run(cmd, check=True)
+        else:
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        segment_paths.append(out_path)
+        offsets_ms.append(start_ms)
+        approx_durations_ms.append(max(0, end_ms - start_ms))
+
+    # Refine durations using actual encoded file lengths when available
+    durations_ms: List[int] = []
+    for path, approx in zip(segment_paths, approx_durations_ms):
+        d = get_audio_duration_ms(path)
+        durations_ms.append(d if d is not None else approx)
+
+    return segment_paths, offsets_ms, durations_ms, total_ms
+
+

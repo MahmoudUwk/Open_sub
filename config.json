@@ -7,5 +7,8 @@
   "output_dir": "output_srt",
   "tmp_dir": "tmp_segments",
   "cleanup": true,
-  "parallel_models": ["gemini-2.5-flash"]
+  "parallel_models": ["gemini-2.5-flash"],
+  "rate_limit_per_minute": 10,
+  "min_segment_minutes": 5,
+  "segment_overlap_seconds": 2
 }
