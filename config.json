@@ -2,13 +2,11 @@
   "audio_path": "extracted_audio/Film1.m4a",
   "source_language": "Arabic",
   "target_language": "Spanish",
-  "model": "gemini-2.5-flash",
-  "num_segments": 10,
   "output_dir": "output_srt",
   "tmp_dir": "tmp_segments",
   "cleanup": true,
-  "parallel_models": ["gemini-2.5-flash"],
-  "rate_limit_per_minute": 10,
-  "min_segment_minutes": 5,
-  "segment_overlap_seconds": 2
+  "transcription_models": ["gemini-2.5-flash", "gemini-2.5-flash-lite"],
+  "min_segment_minutes": 15,
+  "segment_overlap_seconds": 2,
+  "translation_models": ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
 }

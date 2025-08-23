@@ -1,7 +1,3 @@
----
-alwaysApply: true
----
-
 - **Don't change the google genai imports nor API call signature!**
 
 - **Use conda env ST**
