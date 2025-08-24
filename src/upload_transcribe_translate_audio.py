@@ -48,22 +48,20 @@ def transcribe_minimal(
         except Exception as e:
             return "", str(e)
 
-    def _call_with_retries(use_model: str, max_retries: int = 4) -> str:
+    def _call_with_retries(use_model: str, max_retries: int = 3) -> str:
         for attempt in range(1, max_retries + 1):
             text, err = _call_once(use_model)
             if text:
                 return text
             if verbose:
-                if err:
-                    print(f"        [API {use_model}] Error on attempt {attempt}/{max_retries}: '{err}'")
-                else:
-                    print(f"        [API {use_model}] Empty response on attempt {attempt}/{max_retries}")
-            # Fixed backoff: wait 60s on any empty response or error before retrying (no exponential)
+                msg = err or "empty"
+                print(f"[TRAPI] {use_model} attempt {attempt}/{max_retries}: {msg}")
+            # Fixed backoff: wait 20s on any empty response or error before retrying (no exponential)
             if attempt < max_retries:
                 if verbose:
-                    print("        Waiting 60s before next retry...")
-                time.sleep(60)
+                    print("[TRAPI] wait 20s before retry...")
+                time.sleep(20)
         return ""
 
     # Call primary model with fixed-interval retries (no fallbacks)
-    return _call_with_retries(model, max_retries=4)
+    return _call_with_retries(model, max_retries=3)

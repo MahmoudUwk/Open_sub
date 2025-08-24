@@ -6,6 +6,8 @@ import time
 import datetime
 import shutil
 from typing import List, Optional
+from threading import Thread
+from queue import Queue
 
 import google.genai as genai
 
@@ -15,6 +17,28 @@ from .minimal_format import assemble_srt_from_minimal_segments
 from .srt_validate import validate_and_optionally_fix
 from .audio_utils import get_audio_duration_ms
 
+TIMEOUT_TRANSCRIBE_S = 120
+TIMEOUT_TRANSLATE_S = 90
+
+def _call_with_timeout(func, timeout_s: int, *args, **kwargs):
+    """Run func with a wall-clock timeout. Returns (result, err_str or None).
+    On timeout, returns (None, 'timeout').
+    """
+    q: Queue = Queue(maxsize=1)
+    def runner():
+        try:
+            q.put((func(*args, **kwargs), None))
+        except Exception as e:
+            q.put((None, str(e)))
+    t = Thread(target=runner, daemon=True)
+    t.start()
+    t.join(timeout_s)
+    if t.is_alive():
+        return None, "timeout"
+    try:
+        return q.get_nowait()
+    except Exception:
+        return None, "unknown_error"
 
 def _guess_mime_type_from_extension(path: str) -> str:
     """Guess the MIME type of an audio file from its extension."""
@@ -54,31 +78,34 @@ def _transcribe_segments(
     minimal_outputs = []
     for i, seg_path in enumerate(seg_paths):
         model = transcription_models[i % len(transcription_models)]
-        if verbose:
-            print(f"Using transcription model: {model} for segment {i}")
-            print(f"[{datetime.datetime.now()}] Starting call for segment {i}")
         try:
             start_time = time.time()
-            outcome = _call_model_for_segment(
+            outcome, err = _call_with_timeout(
+                _call_model_for_segment,
+                TIMEOUT_TRANSCRIBE_S,
                 seg_path, source_language, model, _guess_mime_type_from_extension(seg_path), verbose
             )
             duration = time.time() - start_time
+            if err == "timeout":
+                if verbose:
+                    print(f"[TR] seg {i} timeout after {TIMEOUT_TRANSCRIBE_S}s")
+                minimal_outputs.append("")
+                continue
+            if err:
+                raise RuntimeError(err)
             if not outcome.strip():
-                print(f"Warning: Transcription empty for segment {i} (model: {model})")
+                if verbose:
+                    print(f"[TR] seg {i} empty output")
             minimal_outputs.append(str(outcome))
             if verbose:
-                print(f"[{datetime.datetime.now()}] Finished call for segment {i}")
-                print(f"Segment {i} API call took {duration:.2f}s (chars={len(outcome)})")
+                print(f"[TR] seg {i} ok {duration:.1f}s chars={len(outcome)}")
             raw_path = os.path.join(output_dir, "raw", f"segment_{i}_raw.txt")
             with open(raw_path, "w", encoding="utf-8") as f:
                 f.write(outcome)
-            if verbose:
-                print(f"Saved raw output to {raw_path}")
         except Exception as e:
-            print(f"Error transcribing segment {i} (model: {model}): {str(e)}")
-            minimal_outputs.append("")
             if verbose:
-                print(f"[{datetime.datetime.now()}] Finished call for segment {i} (error)")
+                print(f"[TR] seg {i} error: {str(e)}")
+            minimal_outputs.append("")
     return minimal_outputs
 
 def _translate_segments(
@@ -101,26 +128,25 @@ def _translate_segments(
         except Exception as e:
             return "", str(e)
 
-    def _call_with_retries(m: str, text: str, max_retries: int = 4) -> str:
+    def _call_with_retries(m: str, text: str, max_retries: int = 3) -> str:
         for attempt in range(1, max_retries + 1):
-            t, err = _call_once(m, text)
+            t, err = _call_with_timeout(_call_once, TIMEOUT_TRANSLATE_S, m, text)
             if t:
                 return t
             if verbose:
-                if err:
-                    print(f"        [API {m}] Translation error on attempt {attempt}/{max_retries}: '{err}'")
-                else:
-                    print(f"        [API {m}] Translation empty on attempt {attempt}/{max_retries}")
+                msg = err or "empty"
+                print(f"[TL] {m} attempt {attempt}/{max_retries}: {msg}")
             if attempt < max_retries:
                 if verbose:
-                    print("        Waiting 60s before next translation retry...")
-                time.sleep(60)
+                    print("[TL] wait 20s before retry...")
+                time.sleep(20)
         return ""
 
     for i, out in enumerate(minimal_outputs):
         if not out.strip():
             translated_outputs.append("")
-            print(f"Skipping translation for empty segment {i}")
+            if verbose:
+                print(f"[TL] seg {i} skip (empty input)")
             continue
 
         model = translation_models[i % len(translation_models)]
@@ -134,17 +160,16 @@ def _translate_segments(
 
         # Call primary model with fixed-interval retries (no fallbacks)
         trans_text = _call_with_retries(model, prompt, max_retries=4)
-
         if not trans_text.strip():
-            print(f"Warning: Translation empty for segment {i} (model: {model})")
+            if verbose:
+                print(f"[TL] seg {i} empty output")
         translated_outputs.append(trans_text)
         if verbose:
-            print(f"Translated segment {i} with {model}")
+            print(f"[TL] seg {i} ok chars={len(trans_text)}")
         translated_path = os.path.join(output_dir, "translated", f"segment_{i}_translated.txt")
         with open(translated_path, "w", encoding="utf-8") as f:
             f.write(trans_text)
-        if verbose:
-            print(f"Saved translated output to {translated_path}")
+        # keep file-system noise out of console
 
     return translated_outputs
 

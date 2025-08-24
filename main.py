@@ -58,6 +58,7 @@ def run_from_config(config_path: str = "config.json") -> None:
         print("Warning: 'translation_fallback_models' is ignored (fixed retry policy in place).")
 
     output_dir = config.get("output_dir", "output_srt")
+    verbose = config.get("verbose", False)
 
     # Recreate fresh directories (root only); run-specific subdir will be created later
     os.makedirs(output_dir, exist_ok=True)
@@ -145,7 +146,7 @@ def run_from_config(config_path: str = "config.json") -> None:
         tmp_dir=tmp_dir,
         output_dir=output_dir,
         cleanup=cleanup,
-        verbose=True,
+        verbose=verbose,
         transcription_models=transcription_models,
         translation_models=translation_models,
     )
