@@ -10,6 +10,7 @@ from typing import List, Optional
 from src.process_long_audio import process_audio_fixed_duration
 from src.get_audio import extract_audio
 from src.audio_utils import get_audio_duration_ms
+from scripts.download_youtube import download_youtube
 
 DEFAULT_CONFIG_PATH = "config.json"
 
@@ -52,19 +53,44 @@ def run_from_config(config_path: str = "config.json") -> None:
     
     tmp_dir = config.get("tmp_dir", "tmp_segments")
     output_dir = config.get("output_dir", "output_srt")
+    extracted_dir = "extracted_audio"
     
-    # Clean up previous runs
+    # Clean up previous runs (tmp, output, and extracted_audio)
     if os.path.exists(tmp_dir):
         shutil.rmtree(tmp_dir, ignore_errors=True)
     if os.path.exists(output_dir):
         shutil.rmtree(output_dir, ignore_errors=True)
+    if os.path.exists(extracted_dir):
+        shutil.rmtree(extracted_dir, ignore_errors=True)
+
+    # Recreate fresh directories
+    os.makedirs(tmp_dir, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(extracted_dir, exist_ok=True)
     
-    video_path = config.get("video_path")
-    if not video_path:
-        raise ValueError("video_path must be specified in config")
-    
-    # Extract audio from video
-    audio_path = extract_audio(video_path, transcribe=True)
+    path_to_vid = config.get("path_to_vid")
+    if not path_to_vid:
+        raise ValueError("path_to_vid must be specified in config (URL or local file path)")
+
+    # Decide whether to download or use local file directly
+    def _is_url(s: str) -> bool:
+        s = s.strip().lower()
+        return s.startswith("http://") or s.startswith("https://") or s.startswith("youtu.be/") or s.startswith("www.youtube.com/")
+
+    if _is_url(path_to_vid):
+        print("[0] Downloading video...", flush=True)
+        local_video_path = download_youtube(path_to_vid, out_dir="downloaded_videos")
+        if not os.path.exists(local_video_path):
+            raise RuntimeError(f"Download failed or missing file: {local_video_path}")
+        print(f"Downloaded: {local_video_path}", flush=True)
+    else:
+        local_video_path = path_to_vid
+        if not os.path.exists(local_video_path) or os.path.isdir(local_video_path):
+            raise FileNotFoundError(f"Local video path not found or is a directory: {local_video_path}")
+        print(f"[0] Using local video: {local_video_path}", flush=True)
+
+    # Extract audio from downloaded video
+    audio_path = extract_audio(local_video_path, transcribe=True)
 
     # Validate extracted audio
     if not os.path.exists(audio_path) or os.path.getsize(audio_path) < 4096:

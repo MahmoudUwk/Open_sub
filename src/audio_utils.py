@@ -174,116 +174,42 @@ def split_audio_by_duration(
     min_minutes = max(5, int(segment_minutes))
     segment_ms = min_minutes * 60 * 1000
 
-    # Compute segment boundaries without overlap
-    boundaries: List[Tuple[int, int]] = []
-    start_ms = 0
-    while start_ms < total_ms:
-        end_ms = min(start_ms + segment_ms, total_ms)
-        if end_ms <= start_ms:
-            break
-        boundaries.append((start_ms, end_ms))
-        if end_ms >= total_ms:
-            break
-        start_ms = end_ms  # No overlap, start next at previous end
-
-    segment_paths: List[str] = []
-    offsets_ms: List[int] = []
-    approx_durations_ms: List[int] = []
-
-    for i, (start_ms, end_ms) in enumerate(boundaries):
-        out_path = os.path.join(tmp_dir, f"seg_{i:02d}.m4a")
-        cmd = [
-            "ffmpeg", "-y", "-nostdin", "-loglevel", "error",
-            "-i", input_audio,
-            "-vn", "-sn", "-dn",
-            "-map", "0:a:0",
-            "-ss", format_seconds_for_ffmpeg(start_ms),
-            "-to", format_seconds_for_ffmpeg(end_ms),
-            "-filter:a", "aformat=channel_layouts=mono,aresample=16000",
-            "-c:a", "aac", "-b:a", "16k",
-            out_path,
-        ]
-        try:
-            if verbose:
-                subprocess.run(cmd, check=True)
-            else:
-                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except subprocess.CalledProcessError:
-            # Fallback: copy stream without decoding; avoids decoder issues on some AAC bitstreams
-            fallback_cmd = [
-                "ffmpeg", "-y", "-nostdin", "-loglevel", "error",
-                "-i", input_audio,
-                "-vn", "-sn", "-dn",
-                "-map", "0:a:0",
-                "-ss", format_seconds_for_ffmpeg(start_ms),
-                "-to", format_seconds_for_ffmpeg(end_ms),
-                "-c:a", "copy", "-bsf:a", "aac_adtstoasc",
-                out_path,
-            ]
-            if verbose:
-                subprocess.run(fallback_cmd, check=True)
-            else:
-                subprocess.run(fallback_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        segment_paths.append(out_path)
-        offsets_ms.append(start_ms)
-        approx_durations_ms.append(max(0, end_ms - start_ms))
-
-    # After attempting per-segment encode/copy, verify outputs; if invalid, fallback to segment muxer with copy
-    def _segments_valid(paths: List[str]) -> bool:
-        if not paths:
-            return False
-        for p in paths:
-            try:
-                if (not os.path.exists(p)) or os.path.getsize(p) <= 1024:
-                    return False
-            except Exception:
-                return False
-        return True
-
-    if not _segments_valid(segment_paths):
-        # Cleanup any partials
-        for p in list(segment_paths):
-            try:
-                os.remove(p)
-            except Exception:
-                pass
-        segment_paths = []
-        # Use segment muxer with copy (no decode)
-        segment_seconds = min_minutes * 60
-        out_pattern = os.path.join(tmp_dir, "seg_%02d.m4a")
-        seg_cmd = [
-            "ffmpeg", "-y", "-nostdin", "-loglevel", "error",
-            "-i", input_audio,
-            "-vn", "-sn", "-dn",
-            "-map", "0:a:0",
-            "-c:a", "copy", "-bsf:a", "aac_adtstoasc",
-            "-f", "segment", "-segment_time", str(segment_seconds),
-            "-reset_timestamps", "1",
-            out_pattern,
-        ]
+    # Always use segment muxer with stream copy to avoid decoding errors entirely
+    segment_seconds = min_minutes * 60
+    out_pattern = os.path.join(tmp_dir, "seg_%02d.m4a")
+    seg_cmd = [
+        "ffmpeg", "-y", "-nostdin", "-loglevel", "error",
+        "-i", input_audio,
+        "-vn", "-sn", "-dn",
+        "-map", "0:a:0",
+        "-c:a", "copy", "-bsf:a", "aac_adtstoasc",
+        "-f", "segment", "-segment_time", str(segment_seconds),
+        "-reset_timestamps", "1",
+        out_pattern,
+    ]
+    if verbose:
+        subprocess.run(seg_cmd, check=True)
+    else:
         subprocess.run(seg_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        segment_paths = [os.path.join(tmp_dir, f) for f in os.listdir(tmp_dir) if f.startswith("seg_") and f.endswith(".m4a")]
-        segment_paths.sort()
-        # Recreate boundaries-based offsets from durations
-        approx_durations_ms = []
-        offsets_ms = []
-        running = 0
-        for p in segment_paths:
-            offsets_ms.append(running)
-            d = get_audio_duration_ms(p)
-            approx_durations_ms.append(d if d is not None else segment_ms)
-            running += approx_durations_ms[-1]
 
-    # Refine durations using actual encoded file lengths when available
+    segment_paths = [
+        os.path.join(tmp_dir, f) for f in os.listdir(tmp_dir)
+        if f.startswith("seg_") and f.endswith(".m4a")
+    ]
+    segment_paths.sort()
+    if not segment_paths:
+        raise RuntimeError("Segmentation failed: no segment files produced")
+
+    # Compute durations and cumulative offsets from actual files
     durations_ms: List[int] = []
-    for path, approx in zip(segment_paths, approx_durations_ms):
-        d = get_audio_duration_ms(path)
-        durations_ms.append(d if d is not None else approx)
-
-    # Recompute offsets_ms using cumulative exact durations to avoid errors
-    offsets_ms = [0]
-    for dur in durations_ms[:-1]:  # All but last
-        offsets_ms.append(offsets_ms[-1] + dur)
+    offsets_ms: List[int] = []
+    running = 0
+    for p in segment_paths:
+        d = get_audio_duration_ms(p)
+        dur = d if d is not None else segment_ms
+        durations_ms.append(dur)
+        offsets_ms.append(running)
+        running += dur
 
     return segment_paths, offsets_ms, durations_ms, total_ms
 

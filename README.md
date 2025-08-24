@@ -1,39 +1,40 @@
 # Open Translate Pipeline
 
 ## Overview
-This project transcribes and translates audio files (e.g., from videos) using Google's Gemini models, generating SRT subtitle files. It handles long audios by splitting into segments, processing in parallel/sequentially with model alternation, and assembling with overlap handling.
+This project extracts audio from videos, transcribes and translates it using Gemini-2.5-pro, and generates SRT subtitles. It splits long audios into non-overlapping segments, processes sequentially, and assembles into a single SRT with precise timing.
 
 ## Setup
-- Activate conda environment: `conda activate ST`
-- Install dependencies: `pip install google-generativeai`
-- Ensure ffmpeg is installed (for audio splitting/duration).
-- Set GEMINI_API_KEY in .env or environment.
+- Activate conda env: `conda activate ST`
+- Install: `pip install google-generativeai yt-dlp`
+- Ensure ffmpeg is installed.
+- Set GEMINI_API_KEY in environment (no .env files).
 
 ## Configuration (config.json)
-- `audio_path`: Path to input audio file (e.g., "extracted_audio/Film1.m4a").
-- `source_language`: Language of speech in audio (e.g., "Arabic").
-- `target_language`: Target translation language (e.g., "Spanish").
-- `output_dir`: Directory for SRT output (e.g., "output_srt").
-- `tmp_dir`: Temporary directory for segments (e.g., "tmp_segments").
-- `cleanup`: Boolean to delete tmp files after (true/false).
-- `min_segment_minutes`: Minimum segment length in minutes (e.g., 15).
-- `segment_overlap_seconds`: Overlap between segments in seconds (e.g., 2) to avoid gaps.
-- `transcription_models`: List of models to alternate for transcription (e.g., ["gemini-2.5-flash", "gemini-2.5-flash-lite"]).
-- `translation_models`: List of models to alternate for translation (similar).
+- `path_to_vid`: Either a YouTube URL (http/https) or a local video file path (e.g., .mp4). If URL, the pipeline downloads it first; if local path, it uses it directly.
+- `source_language`: Audio language (e.g., "Arabic").
+- `target_language`: Translation language (e.g., "Latin American Spanish").
+- `output_dir`: SRT output dir (e.g., "output_srt").
+- `tmp_dir`: Temp segments dir (e.g., "tmp_segments").
+- `cleanup`: Delete tmp files after (true/false).
+- `min_segment_minutes`: Segment length in minutes (e.g., 5).
+- `transcription_models`: ["gemini-2.5-pro"] (default).
+- `translation_models`: ["gemini-2.5-pro"] (default).
 
 ## How It Works
-1. **Loading/Config**: `main.py` loads config.json and calls `process_audio_fixed_duration` from `src/process_long_audio.py`.
-2. **Audio Splitting** (`src/audio_utils.py`): Splits input audio into ~15-min segments with 2s overlap using ffmpeg for precise cutting and mono downmix.
-3. **Transcription** (`src/upload_transcribe_translate_audio.py`): Calls Gemini (alternating models) on each segment for timed transcription in simple [start - end]: text format.
-4. **Translation** (`src/process_long_audio.py`): Translates each transcribed line using alternating models via Gemini API.
-5. **Assembly** (`src/minimal_format.py`): Parses outputs, applies global offsets, sorts, dedups/merges overlapping similar entries (normalizes text, merges if overlap or close), builds SRT.
-6. **Outputs**: SRT in output_dir; raw transcriptions in output_dir/raw/.
+1. **Config Load**: `main.py` loads `config.json`.
+2. **Input handling**: If `path_to_vid` is a URL, it downloads the video to `downloaded_videos/` via `scripts/download_youtube.py`. If it's a local path, it uses it directly.
+3. **Audio Extraction** (`src/get_audio.py`): Stream-copies audio from the downloaded video to `.m4a` in `extracted_audio/` (no re-encode).
+4. **Splitting** (`src/audio_utils.py`): Splits audio with ffmpeg segmenter using stream copy (no decode/re-encode) into `tmp_segments/`.
+5. **Transcription** (`src/upload_transcribe_translate_audio.py`): Uses Gemini for timed transcription per segment.
+6. **Translation**: Translates each transcription using Gemini.
+7. **Assembly** (`src/minimal_format.py`): Shifts timings cumulatively, sorts, formats to SRT.
+8. **Cleanup**: Optional deletion of temp files.
 
-Overlaps ensure continuity; assembly merges duplicates across overlaps.
+Validations ensure steps succeed before proceeding.
 
 ## Running
-- Edit config.json as needed.
+- Edit config.json.
 - Run: `python main.py`
-- Output: SRT file in output_dir, e.g., Film1.srt.
+- Output: SRT in output_dir (e.g., Film1.srt).
 
-For issues, check console logs for errors/rate limits.
+For issues, check console for concise logs.

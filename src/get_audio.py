@@ -23,51 +23,21 @@ def extract_audio(
     base = os.path.splitext(os.path.basename(video_path))[0]
     
     if transcribe:
+        # Easiest and most robust: avoid decoding entirely; just copy the AAC stream to M4A.
         output_path = output or os.path.join("extracted_audio", base + ".m4a")
-        sample_rate_value = str(sample_rate or 16000)
-        aac_cmd = [
+        copy_cmd = [
             "ffmpeg", "-y", "-nostdin", "-i", video_path, "-vn",
             "-loglevel", "error", "-sn", "-dn",
-            "-err_detect", "ignore_err",
-            "-ac", "1",
-            "-ar", sample_rate_value,
-            "-c:a", "aac",
-            "-b:a", "16k",
+            "-map", "0:a:0",
+            "-c:a", "copy", "-bsf:a", "aac_adtstoasc",
             output_path,
         ]
         try:
-            subprocess.run(aac_cmd, check=True, capture_output=True, text=True)
+            subprocess.run(copy_cmd, check=True, capture_output=True, text=True)
             print(f"Extracted audio: {output_path}")
             return output_path
-        except subprocess.CalledProcessError:
-            # Fallback to WAV PCM extraction
-            fallback_path = (output or os.path.join("extracted_audio", base + ".wav"))
-            wav_cmd = [
-                "ffmpeg", "-y", "-nostdin", "-i", video_path, "-vn",
-                "-loglevel", "error", "-sn", "-dn",
-                "-map", "0:a:0",
-                "-ac", "1",
-                "-ar", "16000",
-                "-c:a", "pcm_s16le",
-                fallback_path,
-            ]
-            try:
-                subprocess.run(wav_cmd, check=True, capture_output=True, text=True)
-                print(f"Extracted audio: {fallback_path}")
-                return fallback_path
-            except subprocess.CalledProcessError:
-                # Final fallback: stream copy (no decode). Downsampling will happen during splitting.
-                copy_path = output or os.path.join("extracted_audio", base + ".m4a")
-                copy_cmd = [
-                    "ffmpeg", "-y", "-nostdin", "-i", video_path, "-vn",
-                    "-loglevel", "error", "-sn", "-dn",
-                    "-map", "0:a:0",
-                    "-c:a", "copy",
-                    copy_path,
-                ]
-                subprocess.run(copy_cmd, check=True, capture_output=True, text=True)
-                print(f"Extracted audio: {copy_path}")
-                return copy_path
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"Error extracting audio (copy) for transcription: {e}")
     elif copy:
         output_path = output or os.path.join("extracted_audio", base + ".m4a")
         if mono or sample_rate or bitrate:
