@@ -12,4 +12,4 @@ alwaysApply: true
 
 - **Don't create CLI for the scripts**
 
-- **Always use  "gemini-2.5-flash" !!**
+- **Don't change the gemini model names, unless the user says so!!**

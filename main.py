@@ -3,11 +3,13 @@
 import os
 import json
 import time
+import shutil
 from dataclasses import dataclass
 from typing import List, Optional
 
 from src.process_long_audio import process_audio_fixed_duration
 from src.get_audio import extract_audio
+from src.audio_utils import get_audio_duration_ms
 
 DEFAULT_CONFIG_PATH = "config.json"
 
@@ -48,13 +50,29 @@ def run_from_config(config_path: str = "config.json") -> None:
     with open(config_path, "r") as f:
         config = json.load(f)
     
+    tmp_dir = config.get("tmp_dir", "tmp_segments")
+    output_dir = config.get("output_dir", "output_srt")
+    
+    # Clean up previous runs
+    if os.path.exists(tmp_dir):
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    if os.path.exists(output_dir):
+        shutil.rmtree(output_dir, ignore_errors=True)
+    
     video_path = config.get("video_path")
     if not video_path:
         raise ValueError("video_path must be specified in config")
     
     # Extract audio from video
     audio_path = extract_audio(video_path, transcribe=True)
-    
+
+    # Validate extracted audio
+    if not os.path.exists(audio_path) or os.path.getsize(audio_path) < 4096:
+        raise RuntimeError(f"Audio extraction failed or too small: {audio_path}")
+    extracted_ms = get_audio_duration_ms(audio_path)
+    if not extracted_ms or extracted_ms < 5000:
+        raise RuntimeError(f"Invalid extracted audio duration: {extracted_ms} ms")
+
     source_language = config.get("source_language")
     target_language = config.get("target_language")
     min_segment_minutes = config.get("min_segment_minutes", 15)
@@ -76,7 +94,7 @@ def run_from_config(config_path: str = "config.json") -> None:
         transcription_models=transcription_models,
         translation_models=translation_models,
     )
-    print(f"Processing completed. Output SRT: {out_path}")
+    print(f"SRT: {out_path}")
 
 if __name__ == "__main__":
     run_from_config()

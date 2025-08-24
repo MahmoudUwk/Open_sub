@@ -24,29 +24,69 @@ def extract_audio(
     
     if transcribe:
         output_path = output or os.path.join("extracted_audio", base + ".m4a")
-        bitrate_value = bitrate or "48k"
         sample_rate_value = str(sample_rate or 16000)
-        cmd = [
-            "ffmpeg", "-i", video_path, "-vn",
+        aac_cmd = [
+            "ffmpeg", "-y", "-nostdin", "-i", video_path, "-vn",
+            "-loglevel", "error", "-sn", "-dn",
+            "-err_detect", "ignore_err",
             "-ac", "1",
             "-ar", sample_rate_value,
             "-c:a", "aac",
-            "-b:a", bitrate_value,
+            "-b:a", "16k",
             output_path,
         ]
+        try:
+            subprocess.run(aac_cmd, check=True, capture_output=True, text=True)
+            print(f"Extracted audio: {output_path}")
+            return output_path
+        except subprocess.CalledProcessError:
+            # Fallback to WAV PCM extraction
+            fallback_path = (output or os.path.join("extracted_audio", base + ".wav"))
+            wav_cmd = [
+                "ffmpeg", "-y", "-nostdin", "-i", video_path, "-vn",
+                "-loglevel", "error", "-sn", "-dn",
+                "-map", "0:a:0",
+                "-ac", "1",
+                "-ar", "16000",
+                "-c:a", "pcm_s16le",
+                fallback_path,
+            ]
+            try:
+                subprocess.run(wav_cmd, check=True, capture_output=True, text=True)
+                print(f"Extracted audio: {fallback_path}")
+                return fallback_path
+            except subprocess.CalledProcessError:
+                # Final fallback: stream copy (no decode). Downsampling will happen during splitting.
+                copy_path = output or os.path.join("extracted_audio", base + ".m4a")
+                copy_cmd = [
+                    "ffmpeg", "-y", "-nostdin", "-i", video_path, "-vn",
+                    "-loglevel", "error", "-sn", "-dn",
+                    "-map", "0:a:0",
+                    "-c:a", "copy",
+                    copy_path,
+                ]
+                subprocess.run(copy_cmd, check=True, capture_output=True, text=True)
+                print(f"Extracted audio: {copy_path}")
+                return copy_path
     elif copy:
         output_path = output or os.path.join("extracted_audio", base + ".m4a")
         if mono or sample_rate or bitrate:
-            print("Note: Cannot copy with channel/sample-rate/bitrate changes; falling back to high-quality re-encoding.")
+            print("Note: copy with channel/rate/bitrate changes not supported; re-encoding.")
             bitrate_value = bitrate or "128k"
-            cmd = ["ffmpeg", "-i", video_path, "-vn"]
+            cmd = ["ffmpeg", "-y", "-nostdin", "-i", video_path, "-vn"]
             if mono:
                 cmd.extend(["-ac", "1"])
             if sample_rate:
                 cmd.extend(["-ar", str(sample_rate)])
             cmd.extend(["-c:a", "aac", "-b:a", bitrate_value, output_path])
         else:
-            cmd = ["ffmpeg", "-i", video_path, "-vn", "-c:a", "copy", output_path]
+            cmd = ["ffmpeg", "-y", "-nostdin", "-i", video_path, "-vn", "-c:a", "copy", output_path]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            print(f"Extracted audio: {output_path}")
+            return output_path
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"Error extracting audio: {e}")
     else:
         format_ext = {"mp3": "mp3", "aac": "m4a", "vorbis": "ogg", "flac": "flac", "wav": "wav", "aiff": "aiff"}
         output_path = output or os.path.join("extracted_audio", base + "." + format_ext[format])
@@ -61,7 +101,7 @@ def extract_audio(
         }
         quality_param = quality_map[format][quality]
         
-        cmd = ["ffmpeg", "-i", video_path, "-vn"]
+        cmd = ["ffmpeg", "-y", "-nostdin", "-i", video_path, "-vn", "-loglevel", "error"]
         if mono:
             cmd.extend(["-ac", "1"])
         if sample_rate:
@@ -85,13 +125,13 @@ def extract_audio(
         elif format == "aiff":
             cmd.extend(["-c:a", "pcm_s16be"])
         cmd.append(output_path)
-    
-    try:
-        subprocess.run(cmd, check=True)
-        print(f"Audio extracted successfully to '{output_path}'")
-        return output_path
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"Error extracting audio: {e}")
+        
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            print(f"Extracted audio: {output_path}")
+            return output_path
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"Error extracting audio: {e}")
 
 
 

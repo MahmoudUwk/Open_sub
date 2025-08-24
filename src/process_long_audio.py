@@ -150,33 +150,41 @@ def process_audio_fixed_duration(
     total_ms = get_audio_duration_ms(input_audio)
     if total_ms < min_segment_minutes * 60 * 1000:
         if verbose:
-            print("[1/5] Audio is short; skipping split...")
+            print("[1] Audio is short; skipping split...")
         seg_paths = [input_audio]
         offsets_ms = [0]
         seg_durations_ms = [total_ms]
     else:
         if verbose:
-            print("[1/5] Splitting by duration...", flush=True)
+            print("[1] Splitting by duration...", flush=True)
         seg_paths, offsets_ms, seg_durations_ms, total_ms = split_audio_by_duration(
             input_audio, min_segment_minutes, tmp_dir, verbose
         )
-    if not seg_paths:
-        raise RuntimeError("No segments produced.")
+    # Guard: ensure segments were created and valid
+    if not seg_paths or any((not os.path.exists(p) or os.path.getsize(p) < 1024) for p in seg_paths):
+        raise RuntimeError("Segmenting failed: missing or tiny segment files")
 
     if verbose:
-        print("[2/5] Transcribing segments...", flush=True)
+        print("[2] Transcribe", flush=True)
     minimal_outputs = _transcribe_segments(
         seg_paths, source_language, transcription_models, output_dir, verbose
     )
 
+    # Guard: ensure we have any non-empty transcription before translating
+    if not any(s.strip() for s in minimal_outputs):
+        raise RuntimeError("Transcription failed: all segments empty")
+
     if verbose:
-        print("[3/5] Translating segments...", flush=True)
+        print("[3] Translate", flush=True)
     translated_outputs = _translate_segments(
         minimal_outputs, source_language, target_language, translation_models, output_dir, verbose
     )
 
+    if not any(t.strip() for t in translated_outputs):
+        raise RuntimeError("Translation failed: all segments empty")
+
     if verbose:
-        print("[4/5] Assembling global SRT...", flush=True)
+        print("[4] Assemble", flush=True)
     srt_text = assemble_srt_from_minimal_segments(
         translated_outputs, offsets_ms
     )
@@ -186,16 +194,16 @@ def process_audio_fixed_duration(
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(srt_text)
     if verbose:
-        print(f"  - Wrote {out_path}", flush=True)
+        print(f"Wrote {out_path}", flush=True)
 
+    if cleanup and verbose:
+        print("[5] Cleanup", flush=True)
     if cleanup:
-        if verbose:
-            print("[5/5] Cleaning up temporary files...", flush=True)
         try:
             shutil.rmtree(tmp_dir)
         except Exception as e:
             print(f"Error cleaning up tmp_dir: {e}")
 
     if verbose:
-        print(f"Total: {time.time() - t0:.1f}s", flush=True)
+        print(f"Done in {time.time() - t0:.1f}s", flush=True)
     return out_path
