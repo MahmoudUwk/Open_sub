@@ -34,10 +34,25 @@ def extract_audio(
         ]
         try:
             subprocess.run(copy_cmd, check=True, capture_output=True, text=True)
-            print(f"Extracted audio: {output_path}")
+            print(f"Extracted audio (copy): {output_path}")
             return output_path
         except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Error extracting audio (copy) for transcription: {e}")
+            # Fallback: re-encode to AAC m4a (handles opus/webm or incompatible AAC bitstreams)
+            fallback_cmd = [
+                "ffmpeg", "-y", "-nostdin", "-i", video_path, "-vn",
+                "-loglevel", "error", "-sn", "-dn",
+                "-map", "0:a:0",
+                "-c:a", "aac", "-b:a", "160k",
+                output_path,
+            ]
+            try:
+                subprocess.run(fallback_cmd, check=True, capture_output=True, text=True)
+                print(f"Extracted audio (re-encode fallback): {output_path}")
+                return output_path
+            except subprocess.CalledProcessError as e2:
+                msg = ("Audio extraction failed. Copy error: "
+                       f"{e.stderr or e} | Fallback error: {e2.stderr or e2}")
+                raise RuntimeError(msg)
     elif copy:
         output_path = output or os.path.join("extracted_audio", base + ".m4a")
         if mono or sample_rate or bitrate:
