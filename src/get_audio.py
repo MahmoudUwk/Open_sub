@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-
-import argparse
 import os
 import subprocess
 
@@ -94,8 +91,5 @@ def extract_audio(
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Error extracting audio: {e}")
 
-
-if __name__ == "__main__":
-    main()
 
 

@@ -7,22 +7,52 @@ TIME_RE_HHMMSS_MS = re.compile(r"^(\d{2}):(\d{2}):(\d{2})([.,](\d{1,3}))?$")
 TIME_LINE_RE = re.compile(r'^\s*\[(.+?)\s*-\s*(.+?)\]:\s*(.+?)\s*$')
 
 def parse_time_value_to_ms(value: Any) -> Optional[int]:
-    """Parse a flexible time value into milliseconds."""
+    """Parse a flexible time value into milliseconds.
+
+    Accepts:
+    - HH:MM:SS[,.]ms
+    - MM:SS[,.]ms
+    - SS[,.]ms
+    - integer milliseconds or seconds (floats)
+    """
     if value is None:
         return None
     if isinstance(value, (int, float)):
         return max(0, int(round(value * 1000)) if isinstance(value, float) else int(value))
     if isinstance(value, str):
         v = value.strip()
+        # Try strict HH:MM:SS first
         m = TIME_RE_HHMMSS_MS.match(v)
         if m:
             hh, mm, ss, _, ms_part = m.groups()
             ms = int((ms_part or '0').ljust(3, '0'))
             return ((int(hh) * 60 + int(mm)) * 60 + int(ss)) * 1000 + ms
+        # Flexible parsing for MM:SS, SS and decimal seconds
+        vv = v.replace(',', '.')
+        if ':' in vv:
+            parts = vv.split(':')
+            try:
+                if len(parts) == 3:
+                    h = int(parts[0])
+                    m2 = int(parts[1])
+                    s = float(parts[2])
+                elif len(parts) == 2:
+                    h = 0
+                    m2 = int(parts[0])
+                    s = float(parts[1])
+                else:
+                    h = 0
+                    m2 = 0
+                    s = float(parts[-1])
+                total_ms = int(round(((h * 60 + m2) * 60 + s) * 1000))
+                return max(0, total_ms)
+            except ValueError:
+                return None
         try:
-            if '.' in v or ',' in v:
-                return max(0, int(round(float(v.replace(',', '.')) * 1000)))
-            return max(0, int(v))
+            # Plain seconds or milliseconds as float or int
+            if '.' in vv:
+                return max(0, int(round(float(vv) * 1000)))
+            return max(0, int(vv))
         except ValueError:
             return None
     return None
@@ -66,26 +96,21 @@ def parse_minimal_lines(text: str) -> List[Dict[str, Any]]:
 def assemble_srt_from_minimal_segments(
     segment_outputs: List[str],
     offsets_ms: List[int],
-    segment_durations_ms: Optional[List[int]] = None,
-    total_duration_ms: Optional[int] = None,
+    segment_durations_ms: Optional[List[int]] = None, # Unused, kept for backward compatibility
+    total_duration_ms: Optional[int] = None, # Unused, kept for backward compatibility
 ) -> str:
     """Assemble a final SRT file from multiple timed-line segment outputs by appending and shifting."""
     entries = []
-    current_offset = 0
     for idx, text in enumerate(segment_outputs):
         items = parse_minimal_lines(text)
         if not items:
             continue
-        # Use provided offset if available, else cumulative
-        offset = offsets_ms[idx] if idx < len(offsets_ms) else current_offset
+        offset = offsets_ms[idx]  # Directly use the provided offset
         for it in items:
             start = it["start_ms"] + offset
             end = it["end_ms"] + offset
             entries.append((start, end, it["text"]))
-        # Update cumulative for next (if durations provided)
-        if segment_durations_ms and idx < len(segment_durations_ms):
-            current_offset += segment_durations_ms[idx]
     entries.sort(key=lambda t: (t[0], t[1]))
-    srt_lines = [f"{i+1}\n{ms_to_hhmmssms(s)} --> {ms_to_hhmmssms(e)}\n{c}\n" 
+    srt_lines = [f"{i+1}\n{ms_to_hhmmssms(s)} --> {ms_to_hhmmssms(e)}\n{c}\n"
                  for i, (s, e, c) in enumerate(entries)]
     return "\n".join(srt_lines)
