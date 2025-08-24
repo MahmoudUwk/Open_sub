@@ -5,7 +5,6 @@ import time
 import datetime
 import shutil
 from typing import List, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import google.genai as genai
 
@@ -48,12 +47,10 @@ def _transcribe_segments(
     transcription_models: List[str],
     output_dir: str,
     verbose: bool,
-    max_workers: int = 5,
 ) -> List[str]:
-    """Transcribe audio segments in parallel and keep outputs ordered by index."""
-    results: List[str] = [""] * len(seg_paths)
-
-    def _task(i: int, seg_path: str) -> None:
+    """Transcribe each audio segment sequentially."""
+    minimal_outputs = []
+    for i, seg_path in enumerate(seg_paths):
         model = transcription_models[i % len(transcription_models)]
         if verbose:
             print(f"Using transcription model: {model} for segment {i}")
@@ -66,7 +63,7 @@ def _transcribe_segments(
             duration = time.time() - start_time
             if not outcome.strip():
                 print(f"Warning: Transcription empty for segment {i} (model: {model})")
-            results[i] = str(outcome)
+            minimal_outputs.append(str(outcome))
             if verbose:
                 print(f"[{datetime.datetime.now()}] Finished call for segment {i}")
                 print(f"Segment {i} API call took {duration:.2f}s (chars={len(outcome)})")
@@ -77,16 +74,10 @@ def _transcribe_segments(
                 print(f"Saved raw output to {raw_path}")
         except Exception as e:
             print(f"Error transcribing segment {i} (model: {model}): {str(e)}")
-            results[i] = ""
+            minimal_outputs.append("")
             if verbose:
                 print(f"[{datetime.datetime.now()}] Finished call for segment {i} (error)")
-
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = [ex.submit(_task, i, p) for i, p in enumerate(seg_paths)]
-        for _ in as_completed(futures):
-            pass
-
-    return results
+    return minimal_outputs
 
 def _translate_segments(
     minimal_outputs: List[str],
@@ -141,7 +132,6 @@ def process_audio_fixed_duration(
     verbose: bool = True,
     transcription_models: Optional[List[str]] = None,
     translation_models: Optional[List[str]] = None,
-    max_workers: int = 5,
 ) -> str:
     """Split audio by duration, transcribe, translate, and assemble SRT."""
     if transcription_models is None:
@@ -177,7 +167,7 @@ def process_audio_fixed_duration(
     if verbose:
         print("[2] Transcribe", flush=True)
     minimal_outputs = _transcribe_segments(
-        seg_paths, source_language, transcription_models, output_dir, verbose, max_workers=max_workers
+        seg_paths, source_language, transcription_models, output_dir, verbose
     )
 
     # Guard: ensure we have any non-empty transcription before translating

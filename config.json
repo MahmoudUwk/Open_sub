@@ -8,5 +8,5 @@
   "transcription_models": ["gemini-2.5-pro"],
   "min_segment_minutes": 15,
   "translation_models": ["gemini-2.5-pro"],
-  "max_workers": 5
+  "max_workers": 2
 }
