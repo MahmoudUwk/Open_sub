@@ -24,10 +24,10 @@ def transcribe_minimal(
     audio_bytes: bytes,
     mime_type: str,
     source_language: str,
-    model: str = "gemini-2.5-flash",
+    model: str = "gemini-2.5-pro",
     verbose: bool = False,
 ) -> str:
-    """Call the model with retries on empty response; fallback on rate limit or persistent empty."""
+    """Call the model with retries on empty response or errors like rate limits."""
     if not isinstance(audio_bytes, (bytes, bytearray)) or not audio_bytes:
         return ""
 
@@ -48,26 +48,11 @@ def transcribe_minimal(
                 if verbose:
                     print(f"        [API {use_model}] Empty response on attempt {attempt}/{max_retries}")
             except Exception as e:
+                msg = str(e)
                 if verbose:
-                    print(f"        [API {use_model}] Error on attempt {attempt}: '{str(e)}'")
+                    print(f"        [API {use_model}] Error on attempt {attempt}: '{msg}'")
                 if attempt == max_retries:
-                    raise
-        return ""  # All retries failed or empty
+                    return ""  # Give up after max retries
+        return ""  # All retries empty
 
-    try:
-        return _call_with_retries(model)
-    except Exception as e:
-        msg = str(e)
-        if any(token.lower() in msg.lower() for token in RATE_LIMIT_ERRORS):
-            if verbose:
-                print("        [API] rate-limited; falling back to gemini-2.5-flash-lite", flush=True)
-            try:
-                return _call_with_retries("gemini-2.5-flash-lite")
-            except Exception as fallback_e:
-                if verbose:
-                    print(f"        [API gemini-2.5-flash-lite] fallback error: '{fallback_e}'", flush=True)
-                return ""
-        else:
-            if verbose:
-                print(f"        [API {model}] error: '{msg}'", flush=True)
-            return ""
+    return _call_with_retries(model)

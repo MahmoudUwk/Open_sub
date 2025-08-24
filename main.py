@@ -54,8 +54,8 @@ def run_from_config(config_path: str = DEFAULT_CONFIG_PATH) -> None:
     tmp_dir = config.get("tmp_dir", "tmp_segments")
     output_dir = config.get("output_dir", "output_srt")
     cleanup = config.get("cleanup", True)
-    transcription_models = config.get("transcription_models", ["gemini-2.5-flash", "gemini-2.5-flash-lite"])
-    translation_models = config.get("translation_models", ["gemini-2.5-flash", "gemini-2.5-flash-lite"])
+    transcription_models = config.get("transcription_models", ["gemini-2.5-pro"])
+    translation_models = config.get("translation_models", ["gemini-2.5-pro"])
     
     if not audio_path:
         raise ValueError("audio_path must be specified in config")

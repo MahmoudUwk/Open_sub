@@ -134,9 +134,9 @@ def process_audio_fixed_duration(
 ) -> str:
     """Split audio by duration, transcribe, translate, and assemble SRT."""
     if transcription_models is None:
-        transcription_models = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
+        transcription_models = ["gemini-2.5-pro"]
     if translation_models is None:
-        translation_models = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
+        translation_models = ["gemini-2.5-pro"]
 
     if not os.path.exists(input_audio):
         raise FileNotFoundError(f"Input audio not found: {input_audio}")
