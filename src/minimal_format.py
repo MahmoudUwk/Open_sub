@@ -69,16 +69,22 @@ def assemble_srt_from_minimal_segments(
     segment_durations_ms: Optional[List[int]] = None,
     total_duration_ms: Optional[int] = None,
 ) -> str:
-    """Assemble a final SRT file from multiple timed-line segment outputs."""
+    """Assemble a final SRT file from multiple timed-line segment outputs by appending and shifting."""
     entries = []
-    for idx, (text, offset) in enumerate(zip(segment_outputs, offsets_ms)):
+    current_offset = 0
+    for idx, text in enumerate(segment_outputs):
         items = parse_minimal_lines(text)
         if not items:
             continue
+        # Use provided offset if available, else cumulative
+        offset = offsets_ms[idx] if idx < len(offsets_ms) else current_offset
         for it in items:
             start = it["start_ms"] + offset
             end = it["end_ms"] + offset
             entries.append((start, end, it["text"]))
+        # Update cumulative for next (if durations provided)
+        if segment_durations_ms and idx < len(segment_durations_ms):
+            current_offset += segment_durations_ms[idx]
     entries.sort(key=lambda t: (t[0], t[1]))
     srt_lines = [f"{i+1}\n{ms_to_hhmmssms(s)} --> {ms_to_hhmmssms(e)}\n{c}\n" 
                  for i, (s, e, c) in enumerate(entries)]
