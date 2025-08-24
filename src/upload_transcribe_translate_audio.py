@@ -58,6 +58,13 @@ def transcribe_minimal(
                     print(f"        [API {use_model}] Error on attempt {attempt}: '{err}'")
                 else:
                     print(f"        [API {use_model}] Empty response on attempt {attempt}/{max_retries}")
+            # Backoff 60s on rate-limit / resource exhaustion before retrying
+            if err:
+                low = err.lower()
+                if any(tok.lower() in low for tok in RATE_LIMIT_ERRORS):
+                    if verbose:
+                        print("        Rate limit/resource exhaustion detected. Backing off 60s...")
+                    time.sleep(60)
         return ""
 
     def _load_fallbacks(key: str, default: list[str]) -> list[str]:
@@ -78,6 +85,11 @@ def transcribe_minimal(
     if verbose:
         msg = err or "empty response"
         print(f"        [API {model}] Primary attempt failed: {msg}")
+    # If primary failed due to rate limit/resource exhaustion, back off 60s before fallbacks
+    if err and any(tok.lower() in err.lower() for tok in RATE_LIMIT_ERRORS):
+        if verbose:
+            print("        Rate limit/resource exhaustion after primary. Backing off 60s before fallbacks...")
+        time.sleep(60)
 
     # Fallback chain from config: transcription_fallback_models
     fallbacks = _load_fallbacks("transcription_fallback_models", ["gemini-2.5-flash"])  # default to flash
