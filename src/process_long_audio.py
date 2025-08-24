@@ -1,6 +1,7 @@
 """Main audio processing pipeline."""
 
 import os
+import json
 import time
 import datetime
 import shutil
@@ -87,14 +88,47 @@ def _translate_segments(
     output_dir: str,
     verbose: bool,
 ) -> List[str]:
-    """Translate each transcribed segment."""
+    """Translate each transcribed segment with configurable fallbacks."""
     translated_outputs = []
     client = genai.Client()
+
+    def _load_fallbacks(key: str, default: list[str]) -> list[str]:
+        try:
+            with open("config.json", "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            lst = cfg.get(key)
+            if isinstance(lst, list) and all(isinstance(x, str) for x in lst):
+                return lst
+        except Exception:
+            pass
+        return default
+
+    def _call_once(m: str, text: str) -> tuple[str, str | None]:
+        try:
+            response = client.models.generate_content(model=m, contents=text)
+            t = (getattr(response, "text", None) or "").strip()
+            return t, None
+        except Exception as e:
+            return "", str(e)
+
+    def _call_with_retries(m: str, text: str, max_retries: int = 3) -> str:
+        for attempt in range(1, max_retries + 1):
+            t, err = _call_once(m, text)
+            if t:
+                return t
+            if verbose:
+                if err:
+                    print(f"        [API {m}] Translation error on attempt {attempt}: '{err}'")
+                else:
+                    print(f"        [API {m}] Translation empty on attempt {attempt}/{max_retries}")
+        return ""
+
     for i, out in enumerate(minimal_outputs):
         if not out.strip():
             translated_outputs.append("")
             print(f"Skipping translation for empty segment {i}")
             continue
+
         model = translation_models[i % len(translation_models)]
         prompt = (
             f"You are a professional subtitle translator.\n"
@@ -103,22 +137,38 @@ def _translate_segments(
             f"Input:\n{out}\n\n"
             f"Output:\n"
         )
-        try:
-            response = client.models.generate_content(model=model, contents=prompt)
-            trans_text = response.text.strip()
-            if not trans_text.strip():
-                print(f"Warning: Translation empty for segment {i} (model: {model})")
-            translated_outputs.append(trans_text)
+
+        # Try primary once
+        primary_text, primary_err = _call_once(model, prompt)
+        if primary_text:
+            trans_text = primary_text
+        else:
             if verbose:
-                print(f"Translated segment {i} with {model}")
-            translated_path = os.path.join(output_dir, "translated", f"segment_{i}_translated.txt")
-            with open(translated_path, "w", encoding="utf-8") as f:
-                f.write(trans_text)
-            if verbose:
-                print(f"Saved translated output to {translated_path}")
-        except Exception as e:
-            print(f"Error translating segment {i} with {model}: {e}")
-            translated_outputs.append(out)
+                print(f"        [API {model}] Primary translation failed: {primary_err or 'empty response'}")
+            # Fallback chain from config for translation
+            fallbacks = _load_fallbacks("translation_fallback_models", ["gemini-2.5-flash"])  # default
+            trans_text = ""
+            for fb in fallbacks:
+                if verbose:
+                    print(f"        Fallback translation using {fb}")
+                trans_text = _call_with_retries(fb, prompt, max_retries=3)
+                if trans_text:
+                    break
+            if not trans_text:
+                # As a last resort, keep original text to avoid losing content
+                trans_text = out
+
+        if not trans_text.strip():
+            print(f"Warning: Translation empty for segment {i} (model: {model})")
+        translated_outputs.append(trans_text)
+        if verbose:
+            print(f"Translated segment {i} with {model if primary_text else 'fallback'}")
+        translated_path = os.path.join(output_dir, "translated", f"segment_{i}_translated.txt")
+        with open(translated_path, "w", encoding="utf-8") as f:
+            f.write(trans_text)
+        if verbose:
+            print(f"Saved translated output to {translated_path}")
+
     return translated_outputs
 
 def process_audio_fixed_duration(
@@ -142,9 +192,12 @@ def process_audio_fixed_duration(
     if not os.path.exists(input_audio):
         raise FileNotFoundError(f"Input audio not found: {input_audio}")
 
-    os.makedirs(output_dir, exist_ok=True)
-    os.makedirs(os.path.join(output_dir, "raw"), exist_ok=True)
-    os.makedirs(os.path.join(output_dir, "translated"), exist_ok=True)
+    # Group all results for this input under output_dir/<base>/
+    base = os.path.splitext(os.path.basename(input_audio))[0]
+    work_output_dir = os.path.join(output_dir, base)
+    os.makedirs(work_output_dir, exist_ok=True)
+    os.makedirs(os.path.join(work_output_dir, "raw"), exist_ok=True)
+    os.makedirs(os.path.join(work_output_dir, "translated"), exist_ok=True)
 
     t0 = time.time()
     total_ms = get_audio_duration_ms(input_audio)
@@ -167,7 +220,7 @@ def process_audio_fixed_duration(
     if verbose:
         print("[2] Transcribe", flush=True)
     minimal_outputs = _transcribe_segments(
-        seg_paths, source_language, transcription_models, output_dir, verbose
+        seg_paths, source_language, transcription_models, work_output_dir, verbose
     )
 
     # Guard: ensure we have any non-empty transcription before translating
@@ -177,7 +230,7 @@ def process_audio_fixed_duration(
     if verbose:
         print("[3] Translate", flush=True)
     translated_outputs = _translate_segments(
-        minimal_outputs, source_language, target_language, translation_models, output_dir, verbose
+        minimal_outputs, source_language, target_language, translation_models, work_output_dir, verbose
     )
 
     if not any(t.strip() for t in translated_outputs):
@@ -189,8 +242,7 @@ def process_audio_fixed_duration(
         translated_outputs, offsets_ms
     )
 
-    base = os.path.splitext(os.path.basename(input_audio))[0]
-    out_path = os.path.join(output_dir, base + ".srt")
+    out_path = os.path.join(work_output_dir, base + ".srt")
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(srt_text)
     if verbose:
