@@ -19,12 +19,14 @@ def extract_audio(
     if os.path.isdir(video_path):
         raise ValueError(f"Input '{video_path}' is a directory; please provide a video file path.")
     
-    os.makedirs("extracted_audio", exist_ok=True)
     base = os.path.splitext(os.path.basename(video_path))[0]
     
     if transcribe:
         # Easiest and most robust: avoid decoding entirely; just copy the AAC stream to M4A.
-        output_path = output or os.path.join("extracted_audio", base + ".m4a")
+        output_path = output or (base + ".m4a")
+        out_dir = os.path.dirname(output_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
         copy_cmd = [
             "ffmpeg", "-y", "-nostdin", "-i", video_path, "-vn",
             "-loglevel", "error", "-sn", "-dn",
@@ -74,7 +76,10 @@ def extract_audio(
             raise RuntimeError(f"Error extracting audio: {e}")
     else:
         format_ext = {"mp3": "mp3", "aac": "m4a", "vorbis": "ogg", "flac": "flac", "wav": "wav", "aiff": "aiff"}
-        output_path = output or os.path.join("extracted_audio", base + "." + format_ext[format])
+        output_path = output or (base + "." + format_ext[format])
+        out_dir = os.path.dirname(output_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
         
         quality_map = {
             "mp3": {"high": "2", "medium": "5", "low": "7"},
