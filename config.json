@@ -1,5 +1,5 @@
 {
-  "audio_path": "extracted_audio/Film1.m4a",
+  "video_path": "/home/mahmoud/Desktop/Movies/A7lam/Film1.mp4",
   "source_language": "Arabic",
   "target_language": "Latin American Spanish",
   "output_dir": "output_srt",

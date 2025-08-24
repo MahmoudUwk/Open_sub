@@ -11,6 +11,7 @@ import google.genai as genai
 from .audio_utils import split_audio_by_duration
 from .upload_transcribe_translate_audio import transcribe_minimal
 from .minimal_format import assemble_srt_from_minimal_segments
+from .audio_utils import get_audio_duration_ms
 
 
 def _guess_mime_type_from_extension(path: str) -> str:
@@ -146,11 +147,19 @@ def process_audio_fixed_duration(
     os.makedirs(os.path.join(output_dir, "translated"), exist_ok=True)
 
     t0 = time.time()
-    if verbose:
-        print(f"[1/5] Splitting by duration...", flush=True)
-    seg_paths, offsets_ms, seg_durations_ms, total_ms = split_audio_by_duration(
-        input_audio, min_segment_minutes, tmp_dir, verbose
-    )
+    total_ms = get_audio_duration_ms(input_audio)
+    if total_ms < min_segment_minutes * 60 * 1000:
+        if verbose:
+            print("[1/5] Audio is short; skipping split...")
+        seg_paths = [input_audio]
+        offsets_ms = [0]
+        seg_durations_ms = [total_ms]
+    else:
+        if verbose:
+            print("[1/5] Splitting by duration...", flush=True)
+        seg_paths, offsets_ms, seg_durations_ms, total_ms = split_audio_by_duration(
+            input_audio, min_segment_minutes, tmp_dir, verbose
+        )
     if not seg_paths:
         raise RuntimeError("No segments produced.")
 
@@ -169,7 +178,7 @@ def process_audio_fixed_duration(
     if verbose:
         print("[4/5] Assembling global SRT...", flush=True)
     srt_text = assemble_srt_from_minimal_segments(
-        translated_outputs, offsets_ms, seg_durations_ms, total_ms
+        translated_outputs, offsets_ms
     )
 
     base = os.path.splitext(os.path.basename(input_audio))[0]

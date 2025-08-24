@@ -96,8 +96,6 @@ def parse_minimal_lines(text: str) -> List[Dict[str, Any]]:
 def assemble_srt_from_minimal_segments(
     segment_outputs: List[str],
     offsets_ms: List[int],
-    segment_durations_ms: Optional[List[int]] = None, # Unused, kept for backward compatibility
-    total_duration_ms: Optional[int] = None, # Unused, kept for backward compatibility
 ) -> str:
     """Assemble a final SRT file from multiple timed-line segment outputs by appending and shifting."""
     entries = []

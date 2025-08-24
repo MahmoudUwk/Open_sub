@@ -16,6 +16,8 @@ def extract_audio(
     """Extract audio from a video file."""
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video file '{video_path}' does not exist.")
+    if os.path.isdir(video_path):
+        raise ValueError(f"Input '{video_path}' is a directory; please provide a video file path.")
     
     os.makedirs("extracted_audio", exist_ok=True)
     base = os.path.splitext(os.path.basename(video_path))[0]

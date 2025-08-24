@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from src.process_long_audio import process_audio_fixed_duration
+from src.get_audio import extract_audio
 
 DEFAULT_CONFIG_PATH = "config.json"
 
@@ -42,12 +43,18 @@ def load_config(path: str = DEFAULT_CONFIG_PATH) -> PipelineConfig:
         translation_models=cfg.get("translation_models"),
     )
 
-def run_from_config(config_path: str = DEFAULT_CONFIG_PATH) -> None:
+def run_from_config(config_path: str = "config.json") -> None:
     """Load configuration from JSON and run the processing pipeline."""
     with open(config_path, "r") as f:
         config = json.load(f)
     
-    audio_path = config.get("audio_path")
+    video_path = config.get("video_path")
+    if not video_path:
+        raise ValueError("video_path must be specified in config")
+    
+    # Extract audio from video
+    audio_path = extract_audio(video_path, transcribe=True)
+    
     source_language = config.get("source_language")
     target_language = config.get("target_language")
     min_segment_minutes = config.get("min_segment_minutes", 15)
@@ -57,9 +64,6 @@ def run_from_config(config_path: str = DEFAULT_CONFIG_PATH) -> None:
     transcription_models = config.get("transcription_models", ["gemini-2.5-pro"])
     translation_models = config.get("translation_models", ["gemini-2.5-pro"])
     
-    if not audio_path:
-        raise ValueError("audio_path must be specified in config")
-    
     out_path = process_audio_fixed_duration(
         input_audio=audio_path,
         source_language=source_language,
@@ -68,7 +72,7 @@ def run_from_config(config_path: str = DEFAULT_CONFIG_PATH) -> None:
         tmp_dir=tmp_dir,
         output_dir=output_dir,
         cleanup=cleanup,
-        verbose=True,  # Assuming verbose=True
+        verbose=True,
         transcription_models=transcription_models,
         translation_models=translation_models,
     )
