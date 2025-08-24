@@ -17,3 +17,5 @@ alwaysApply: true
 - **Don't create CLI for the scripts**
 
 - **Don't change the gemini model names, unless the user says so!!**
+
+- **Be concise when replying the the user**.

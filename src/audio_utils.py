@@ -41,38 +41,10 @@ def split_audio_ffmpeg(
     tmp_dir: str = "tmp_segments",
     verbose: bool = False,
 ) -> List[str]:
-    """Split audio into <= segment_minutes chunks using ffmpeg; returns list of paths.
-
-    Uses -f segment with a fixed duration to avoid API length issues.
-    """
-    if not os.path.exists(input_audio):
-        raise FileNotFoundError(f"Input audio not found: {input_audio}")
-
-    os.makedirs(tmp_dir, exist_ok=True)
-
-    segment_seconds = segment_minutes * 60
-    out_pattern = os.path.join(tmp_dir, "segment_%03d.m4a")
-
-    cmd = [
-        "ffmpeg", "-y", "-nostdin", "-loglevel", "error",
-        "-i", input_audio,
-        "-vn", "-sn", "-dn",
-        "-map", "0:a:0",
-        "-ss", format_seconds_for_ffmpeg(start_ms),
-        "-to", format_seconds_for_ffmpeg(end_ms),
-        "-filter:a", "aformat=channel_layouts=mono,aresample=16000",
-        "-c:a", "aac", "-b:a", "16k",
-        out_path,
-    ]
-
-    if verbose:
-        subprocess.run(cmd, check=True)
-    else:
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    files = [os.path.join(tmp_dir, f) for f in os.listdir(tmp_dir) if f.startswith("segment_")]
-    files.sort()
-    return files
+    """Deprecated. Not used by the pipeline; use split_audio_by_duration() instead."""
+    raise NotImplementedError(
+        "split_audio_ffmpeg is deprecated and not implemented; use split_audio_by_duration instead."
+    )
 
 
 def get_audio_duration_ms(audio_path: str) -> Optional[int]:
@@ -110,43 +82,9 @@ def compute_segment_offsets_ms(segment_paths: List[str], fallback_segment_ms: in
 
 
 def parse_srt_blocks(srt_text: str) -> List[Tuple[int, str, List[str]]]:
-    """Parse SRT into list of (index, timestamp_line, text_lines)."""
-    blocks: List[Tuple[int, str, List[str]]] = []
-    import os
-import re
-import subprocess
-from typing import List, Tuple, Optional
+    """Deprecated helper (not used). Returns empty list to avoid dead code paths."""
+    return []
 
-
-def format_seconds_for_ffmpeg(ms: int) -> str:
-    """Format milliseconds to ffmpeg-friendly seconds with millisecond precision.
-
-    ffmpeg accepts "HH:MM:SS.mmm" or seconds with decimals; we use seconds.decimals for simplicity.
-    """
-    if ms < 0:
-        ms = 0
-    seconds = ms / 1000.0
-    # Use 3 decimal places (milliseconds)
-    return f"{seconds:.3f}"
-
-
-def get_audio_duration_ms(audio_path: str) -> Optional[int]:
-    """Return audio duration in ms via ffprobe; None if unavailable."""
-    try:
-        result = subprocess.run(
-            [
-                "ffprobe", "-v", "error", "-show_entries", "format=duration",
-                "-of", "default=nw=1:nk=1", audio_path,
-            ],
-            capture_output=True, text=True, check=True,
-        )
-        val = result.stdout.strip()
-        if not val:
-            return None
-        seconds = float(val)
-        return int(round(seconds * 1000))
-    except Exception:
-        return None
 
 def split_audio_by_duration(
     input_audio: str,

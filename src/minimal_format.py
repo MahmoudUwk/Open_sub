@@ -212,15 +212,14 @@ def assemble_srt_from_minimal_segments(
                 seg_len = nxt - offset
         # Normalize local times that drift beyond the segment window (e.g., 10:01 within a 10-min segment)
         def _normalize_local(ms: int) -> int:
+            # Clamp to [0, seg_len-1] rather than wrapping by modulo to avoid
+            # creating artificial time jumps across segment boundaries.
             if seg_len is None:
-                return ms
+                return 0 if ms < 0 else ms
             if ms < 0:
-                # clamp
                 return 0
             if ms >= seg_len:
-                # fold back by whole segment lengths
-                # handles rare cases where local time crosses boundary due to model drift
-                ms = ms % seg_len
+                return max(0, seg_len - 1)
             return ms
         for it in items:
             ls = _normalize_local(it["start_ms"])

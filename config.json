@@ -6,8 +6,6 @@
   "tmp_dir": "tmp_segments",
   "cleanup": true,
   "transcription_models": ["gemini-2.5-pro"],
-  "transcription_fallback_models": ["gemini-2.5-flash"],
   "min_segment_minutes": 10,
-  "translation_models": ["gemini-2.5-flash"],
-  "translation_fallback_models": ["gemini-2.5-pro"]
+  "translation_models": ["gemini-2.5-flash"]
 }

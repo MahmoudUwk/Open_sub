@@ -48,55 +48,22 @@ def transcribe_minimal(
         except Exception as e:
             return "", str(e)
 
-    def _call_with_retries(use_model: str, max_retries: int = 3) -> str:
+    def _call_with_retries(use_model: str, max_retries: int = 4) -> str:
         for attempt in range(1, max_retries + 1):
             text, err = _call_once(use_model)
             if text:
                 return text
             if verbose:
                 if err:
-                    print(f"        [API {use_model}] Error on attempt {attempt}: '{err}'")
+                    print(f"        [API {use_model}] Error on attempt {attempt}/{max_retries}: '{err}'")
                 else:
                     print(f"        [API {use_model}] Empty response on attempt {attempt}/{max_retries}")
-            # Backoff 60s on rate-limit / resource exhaustion before retrying
-            if err:
-                low = err.lower()
-                if any(tok.lower() in low for tok in RATE_LIMIT_ERRORS):
-                    if verbose:
-                        print("        Rate limit/resource exhaustion detected. Backing off 60s...")
-                    time.sleep(60)
+            # Fixed backoff: wait 60s on any empty response or error before retrying (no exponential)
+            if attempt < max_retries:
+                if verbose:
+                    print("        Waiting 60s before next retry...")
+                time.sleep(60)
         return ""
 
-    def _load_fallbacks(key: str, default: list[str]) -> list[str]:
-        try:
-            with open("config.json", "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            lst = cfg.get(key)
-            if isinstance(lst, list) and all(isinstance(x, str) for x in lst):
-                return lst
-        except Exception:
-            pass
-        return default
-
-    # Try the requested model ONCE
-    text, err = _call_once(model)
-    if text:
-        return text
-    if verbose:
-        msg = err or "empty response"
-        print(f"        [API {model}] Primary attempt failed: {msg}")
-    # If primary failed due to rate limit/resource exhaustion, back off 60s before fallbacks
-    if err and any(tok.lower() in err.lower() for tok in RATE_LIMIT_ERRORS):
-        if verbose:
-            print("        Rate limit/resource exhaustion after primary. Backing off 60s before fallbacks...")
-        time.sleep(60)
-
-    # Fallback chain from config: transcription_fallback_models
-    fallbacks = _load_fallbacks("transcription_fallback_models", ["gemini-2.5-flash"])  # default to flash
-    for fb_model in fallbacks:
-        if verbose:
-            print(f"        Fallback to {fb_model}")
-        out = _call_with_retries(fb_model, max_retries=3)
-        if out:
-            return out
-    return ""
+    # Call primary model with fixed-interval retries (no fallbacks)
+    return _call_with_retries(model, max_retries=4)

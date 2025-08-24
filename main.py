@@ -51,6 +51,12 @@ def run_from_config(config_path: str = "config.json") -> None:
     with open(config_path, "r") as f:
         config = json.load(f)
 
+    # Warn about deprecated/ignored keys
+    if "transcription_fallback_models" in config:
+        print("Warning: 'transcription_fallback_models' is ignored (fixed retry policy in place).")
+    if "translation_fallback_models" in config:
+        print("Warning: 'translation_fallback_models' is ignored (fixed retry policy in place).")
+
     output_dir = config.get("output_dir", "output_srt")
 
     # Recreate fresh directories (root only); run-specific subdir will be created later
@@ -128,8 +134,8 @@ def run_from_config(config_path: str = "config.json") -> None:
     tmp_dir = os.path.join(run_dir, config.get("tmp_dir", "tmp_segments"))
     output_dir = config.get("output_dir", "output_srt")
     cleanup = config.get("cleanup", True)
-    transcription_models = config.get("transcription_models", ["gemini-2.5-pro"])
-    translation_models = config.get("translation_models", ["gemini-2.5-pro"])
+    transcription_models = config.get("transcription_models") or ["gemini-2.5-pro"]
+    translation_models = config.get("translation_models") or ["gemini-2.5-pro"]
     
     out_path = process_audio_fixed_duration(
         input_audio=audio_path,

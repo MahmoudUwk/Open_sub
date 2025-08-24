@@ -1,7 +1,7 @@
 import os
 from typing import List, Tuple, Dict
 
-from src.minimal_format import ms_to_hhmmssms, parse_time_value_to_ms
+from .minimal_format import ms_to_hhmmssms, parse_time_value_to_ms
 
 def parse_srt(path: str) -> List[Tuple[int,int,str]]:
     entries: List[Tuple[int,int,str]] = []

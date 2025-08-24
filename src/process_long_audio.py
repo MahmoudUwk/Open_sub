@@ -93,17 +93,6 @@ def _translate_segments(
     translated_outputs = []
     client = genai.Client()
 
-    def _load_fallbacks(key: str, default: list[str]) -> list[str]:
-        try:
-            with open("config.json", "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            lst = cfg.get(key)
-            if isinstance(lst, list) and all(isinstance(x, str) for x in lst):
-                return lst
-        except Exception:
-            pass
-        return default
-
     def _call_once(m: str, text: str) -> tuple[str, str | None]:
         try:
             response = client.models.generate_content(model=m, contents=text)
@@ -112,16 +101,20 @@ def _translate_segments(
         except Exception as e:
             return "", str(e)
 
-    def _call_with_retries(m: str, text: str, max_retries: int = 3) -> str:
+    def _call_with_retries(m: str, text: str, max_retries: int = 4) -> str:
         for attempt in range(1, max_retries + 1):
             t, err = _call_once(m, text)
             if t:
                 return t
             if verbose:
                 if err:
-                    print(f"        [API {m}] Translation error on attempt {attempt}: '{err}'")
+                    print(f"        [API {m}] Translation error on attempt {attempt}/{max_retries}: '{err}'")
                 else:
                     print(f"        [API {m}] Translation empty on attempt {attempt}/{max_retries}")
+            if attempt < max_retries:
+                if verbose:
+                    print("        Waiting 60s before next translation retry...")
+                time.sleep(60)
         return ""
 
     for i, out in enumerate(minimal_outputs):
@@ -139,31 +132,14 @@ def _translate_segments(
             f"Output:\n"
         )
 
-        # Try primary once
-        primary_text, primary_err = _call_once(model, prompt)
-        if primary_text:
-            trans_text = primary_text
-        else:
-            if verbose:
-                print(f"        [API {model}] Primary translation failed: {primary_err or 'empty response'}")
-            # Fallback chain from config for translation
-            fallbacks = _load_fallbacks("translation_fallback_models", ["gemini-2.5-flash"])  # default
-            trans_text = ""
-            for fb in fallbacks:
-                if verbose:
-                    print(f"        Fallback translation using {fb}")
-                trans_text = _call_with_retries(fb, prompt, max_retries=3)
-                if trans_text:
-                    break
-            if not trans_text:
-                # As a last resort, keep original text to avoid losing content
-                trans_text = out
+        # Call primary model with fixed-interval retries (no fallbacks)
+        trans_text = _call_with_retries(model, prompt, max_retries=4)
 
         if not trans_text.strip():
             print(f"Warning: Translation empty for segment {i} (model: {model})")
         translated_outputs.append(trans_text)
         if verbose:
-            print(f"Translated segment {i} with {model if primary_text else 'fallback'}")
+            print(f"Translated segment {i} with {model}")
         translated_path = os.path.join(output_dir, "translated", f"segment_{i}_translated.txt")
         with open(translated_path, "w", encoding="utf-8") as f:
             f.write(trans_text)
@@ -185,9 +161,9 @@ def process_audio_fixed_duration(
     translation_models: Optional[List[str]] = None,
 ) -> str:
     """Split audio by duration, transcribe, translate, and assemble SRT."""
-    if transcription_models is None:
+    if not transcription_models:
         transcription_models = ["gemini-2.5-pro"]
-    if translation_models is None:
+    if not translation_models:
         translation_models = ["gemini-2.5-pro"]
 
     if not os.path.exists(input_audio):
