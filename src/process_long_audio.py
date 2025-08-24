@@ -60,6 +60,8 @@ def _transcribe_segments(
                 seg_path, source_language, model, _guess_mime_type_from_extension(seg_path), verbose
             )
             duration = time.time() - start_time
+            if not outcome.strip():
+                print(f"Warning: Transcription empty for segment {i} (model: {model})")
             minimal_outputs.append(str(outcome))
             if verbose:
                 print(f"[{datetime.datetime.now()}] Finished call for segment {i}")
@@ -70,8 +72,8 @@ def _transcribe_segments(
             if verbose:
                 print(f"Saved raw output to {raw_path}")
         except Exception as e:
+            print(f"Error transcribing segment {i} (model: {model}): {str(e)}")
             minimal_outputs.append("")
-            print(f"Error for segment {i}: {str(e)}")
             if verbose:
                 print(f"[{datetime.datetime.now()}] Finished call for segment {i} (error)")
     return minimal_outputs
@@ -90,6 +92,7 @@ def _translate_segments(
     for i, out in enumerate(minimal_outputs):
         if not out.strip():
             translated_outputs.append("")
+            print(f"Skipping translation for empty segment {i}")
             continue
         model = translation_models[i % len(translation_models)]
         prompt = (
@@ -102,6 +105,8 @@ def _translate_segments(
         try:
             response = client.models.generate_content(model=model, contents=prompt)
             trans_text = response.text.strip()
+            if not trans_text.strip():
+                print(f"Warning: Translation empty for segment {i} (model: {model})")
             translated_outputs.append(trans_text)
             if verbose:
                 print(f"Translated segment {i} with {model}")
@@ -120,7 +125,6 @@ def process_audio_fixed_duration(
     source_language: str,
     target_language: str,
     min_segment_minutes: int = 15,
-    segment_overlap_seconds: int = 2,
     tmp_dir: str = "tmp_segments",
     output_dir: str = "output_srt",
     cleanup: bool = True,
@@ -145,7 +149,7 @@ def process_audio_fixed_duration(
     if verbose:
         print(f"[1/5] Splitting by duration...", flush=True)
     seg_paths, offsets_ms, seg_durations_ms, total_ms = split_audio_by_duration(
-        input_audio, min_segment_minutes, segment_overlap_seconds, tmp_dir, verbose
+        input_audio, min_segment_minutes, tmp_dir, verbose
     )
     if not seg_paths:
         raise RuntimeError("No segments produced.")

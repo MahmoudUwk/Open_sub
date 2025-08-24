@@ -5,32 +5,28 @@ import os
 import subprocess
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Extract audio from a video file.")
-    parser.add_argument("video_path", help="Path to the input video file")
-    parser.add_argument("--output", help="Path to the output audio file (default: extracted_audio/<basename>.<format>)")
-    parser.add_argument("--format", default="mp3", choices=["mp3", "aac", "vorbis", "flac", "wav", "aiff"], help="Output audio format (default: mp3; vorbis=OGG Vorbis)")
-    parser.add_argument("--quality", default="high", choices=["high", "medium", "low"], help="Quality level (default: high)")
-    parser.add_argument("--mono", action="store_true", help="Downmix to mono audio (reduces size)")
-    parser.add_argument("--copy", action="store_true", help="Copy audio stream without re-encoding (preserves exact quality, format becomes m4a)")
-    parser.add_argument("--bitrate", help="Target audio bitrate, e.g., 48k (overrides --quality; not for wav/aiff/flac)")
-    parser.add_argument("--sample_rate", type=int, help="Output sample rate in Hz, e.g., 16000")
-    parser.add_argument("--transcribe", action="store_true", help="Use speech-optimized settings (mono, 16kHz, AAC 48k)")
-    args = parser.parse_args()
-
-    video_path = args.video_path
+def extract_audio(
+    video_path: str,
+    output: str = None,
+    format: str = "mp3",
+    quality: str = "high",
+    mono: bool = False,
+    copy: bool = False,
+    bitrate: str = None,
+    sample_rate: int = None,
+    transcribe: bool = False,
+) -> str:
+    """Extract audio from a video file."""
     if not os.path.exists(video_path):
-        print(f"Error: Video file '{video_path}' does not exist.")
-        return
-
+        raise FileNotFoundError(f"Video file '{video_path}' does not exist.")
+    
     os.makedirs("extracted_audio", exist_ok=True)
-
     base = os.path.splitext(os.path.basename(video_path))[0]
-
-    if args.transcribe:
-        output_path = args.output or os.path.join("extracted_audio", base + ".m4a")
-        bitrate_value = args.bitrate or "48k"
-        sample_rate_value = str(args.sample_rate or 16000)
+    
+    if transcribe:
+        output_path = output or os.path.join("extracted_audio", base + ".m4a")
+        bitrate_value = bitrate or "48k"
+        sample_rate_value = str(sample_rate or 16000)
         cmd = [
             "ffmpeg", "-i", video_path, "-vn",
             "-ac", "1",
@@ -39,23 +35,23 @@ def main():
             "-b:a", bitrate_value,
             output_path,
         ]
-    elif args.copy:
-        output_path = args.output or os.path.join("extracted_audio", base + ".m4a")
-        if args.mono or args.sample_rate or args.bitrate:
+    elif copy:
+        output_path = output or os.path.join("extracted_audio", base + ".m4a")
+        if mono or sample_rate or bitrate:
             print("Note: Cannot copy with channel/sample-rate/bitrate changes; falling back to high-quality re-encoding.")
-            bitrate_value = args.bitrate or "128k"
+            bitrate_value = bitrate or "128k"
             cmd = ["ffmpeg", "-i", video_path, "-vn"]
-            if args.mono:
+            if mono:
                 cmd.extend(["-ac", "1"])
-            if args.sample_rate:
-                cmd.extend(["-ar", str(args.sample_rate)])
+            if sample_rate:
+                cmd.extend(["-ar", str(sample_rate)])
             cmd.extend(["-c:a", "aac", "-b:a", bitrate_value, output_path])
         else:
             cmd = ["ffmpeg", "-i", video_path, "-vn", "-c:a", "copy", output_path]
     else:
         format_ext = {"mp3": "mp3", "aac": "m4a", "vorbis": "ogg", "flac": "flac", "wav": "wav", "aiff": "aiff"}
-        output_path = args.output or os.path.join("extracted_audio", base + "." + format_ext[args.format])
-
+        output_path = output or os.path.join("extracted_audio", base + "." + format_ext[format])
+        
         quality_map = {
             "mp3": {"high": "2", "medium": "5", "low": "7"},
             "aac": {"high": "192k", "medium": "128k", "low": "96k"},
@@ -64,38 +60,39 @@ def main():
             "wav": {"high": None, "medium": None, "low": None},
             "aiff": {"high": None, "medium": None, "low": None},
         }
-        quality_param = quality_map[args.format][args.quality]
-
+        quality_param = quality_map[format][quality]
+        
         cmd = ["ffmpeg", "-i", video_path, "-vn"]
-        if args.mono:
+        if mono:
             cmd.extend(["-ac", "1"])
-        if args.sample_rate:
-            cmd.extend(["-ar", str(args.sample_rate)])
-
-        if args.format == "mp3":
-            if args.bitrate:
-                cmd.extend(["-c:a", "libmp3lame", "-b:a", args.bitrate])
+        if sample_rate:
+            cmd.extend(["-ar", str(sample_rate)])
+        
+        if format == "mp3":
+            if bitrate:
+                cmd.extend(["-c:a", "libmp3lame", "-b:a", bitrate])
             else:
                 cmd.extend(["-c:a", "libmp3lame", "-q:a", quality_param])
-        elif args.format == "aac":
-            cmd.extend(["-c:a", "aac", "-b:a", args.bitrate or quality_param])
-        elif args.format == "vorbis":
-            cmd.extend(["-c:a", "libvorbis", "-b:a", args.bitrate or quality_param])
-        elif args.format == "flac":
+        elif format == "aac":
+            cmd.extend(["-c:a", "aac", "-b:a", bitrate or quality_param])
+        elif format == "vorbis":
+            cmd.extend(["-c:a", "libvorbis", "-b:a", bitrate or quality_param])
+        elif format == "flac":
             cmd.extend(["-c:a", "flac"])
             if quality_param is not None:
                 cmd.extend(["-compression_level", quality_param])
-        elif args.format == "wav":
+        elif format == "wav":
             cmd.extend(["-c:a", "pcm_s16le"])
-        elif args.format == "aiff":
+        elif format == "aiff":
             cmd.extend(["-c:a", "pcm_s16be"])
         cmd.append(output_path)
-
+    
     try:
         subprocess.run(cmd, check=True)
         print(f"Audio extracted successfully to '{output_path}'")
+        return output_path
     except subprocess.CalledProcessError as e:
-        print(f"Error extracting audio: {e}")
+        raise RuntimeError(f"Error extracting audio: {e}")
 
 
 if __name__ == "__main__":

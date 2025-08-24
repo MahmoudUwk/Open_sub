@@ -75,35 +75,11 @@ def assemble_srt_from_minimal_segments(
         items = parse_minimal_lines(text)
         if not items:
             continue
-        seg_len = segment_durations_ms[idx] if segment_durations_ms and idx < len(segment_durations_ms) else None
-        assume_absolute = False
-        if seg_len and seg_len > 0:
-            votes_abs = sum(1 for it in items if it["end_ms"] > seg_len + 1500)
-            assume_absolute = votes_abs > len(items) / 2
         for it in items:
-            start = it["start_ms"] if assume_absolute else it["start_ms"] + offset
-            end = it["end_ms"] if assume_absolute else it["end_ms"] + offset
+            start = it["start_ms"] + offset
+            end = it["end_ms"] + offset
             entries.append((start, end, it["text"]))
     entries.sort(key=lambda t: (t[0], t[1]))
-    clamped = []
-    total_max = total_duration_ms and int(total_duration_ms)
-    for start, end, content in entries:
-        if total_max is not None:
-            start, end = min(start, total_max), min(end, total_max)
-        if end - start >= 600:
-            clamped.append((start, end, content))
-    deduped = []
-    last_entry: Optional[Tuple[int, int, str]] = None
-    for start, end, content in clamped:
-        norm = _normalize_text_for_compare(content)
-        if last_entry and norm == _normalize_text_for_compare(last_entry[2]):
-            ls, le, lt = last_entry
-            if min(le, end) - max(ls, start) > 0 or abs(start - ls) <= 1000:
-                last_entry = (ls, max(le, end), lt)
-                deduped[-1] = last_entry
-                continue
-        deduped.append((start, end, content))
-        last_entry = (start, end, content)
     srt_lines = [f"{i+1}\n{ms_to_hhmmssms(s)} --> {ms_to_hhmmssms(e)}\n{c}\n" 
-                 for i, (s, e, c) in enumerate(deduped)]
+                 for i, (s, e, c) in enumerate(entries)]
     return "\n".join(srt_lines)

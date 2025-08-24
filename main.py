@@ -42,30 +42,37 @@ def load_config(path: str = DEFAULT_CONFIG_PATH) -> PipelineConfig:
         translation_models=cfg.get("translation_models"),
     )
 
-def run_from_config(config_path: str = DEFAULT_CONFIG_PATH) -> str:
-    """Run the audio processing pipeline from a configuration file."""
-    config = load_config(config_path)
-
-    if not os.path.exists(config.audio_path):
-        raise FileNotFoundError(f"Input audio not found: {config.audio_path}")
-
-    t0 = time.time()
+def run_from_config(config_path: str = DEFAULT_CONFIG_PATH) -> None:
+    """Load configuration from JSON and run the processing pipeline."""
+    with open(config_path, "r") as f:
+        config = json.load(f)
+    
+    audio_path = config.get("audio_path")
+    source_language = config.get("source_language")
+    target_language = config.get("target_language")
+    min_segment_minutes = config.get("min_segment_minutes", 15)
+    tmp_dir = config.get("tmp_dir", "tmp_segments")
+    output_dir = config.get("output_dir", "output_srt")
+    cleanup = config.get("cleanup", True)
+    transcription_models = config.get("transcription_models", ["gemini-2.5-flash", "gemini-2.5-flash-lite"])
+    translation_models = config.get("translation_models", ["gemini-2.5-flash", "gemini-2.5-flash-lite"])
+    
+    if not audio_path:
+        raise ValueError("audio_path must be specified in config")
+    
     out_path = process_audio_fixed_duration(
-        input_audio=config.audio_path,
-        source_language=config.source_language,
-        target_language=config.target_language,
-        min_segment_minutes=config.min_segment_minutes,
-        segment_overlap_seconds=config.segment_overlap_seconds,
-        tmp_dir=config.tmp_dir,
-        output_dir=config.output_dir,
-        cleanup=config.cleanup,
-        verbose=True,
-        transcription_models=config.transcription_models,
-        translation_models=config.translation_models,
+        input_audio=audio_path,
+        source_language=source_language,
+        target_language=target_language,
+        min_segment_minutes=min_segment_minutes,
+        tmp_dir=tmp_dir,
+        output_dir=output_dir,
+        cleanup=cleanup,
+        verbose=True,  # Assuming verbose=True
+        transcription_models=transcription_models,
+        translation_models=translation_models,
     )
-    t1 = time.time()
-    print(f"    -> Wrote {out_path} in {t1 - t0:.2f}s", flush=True)
-    return out_path
+    print(f"Processing completed. Output SRT: {out_path}")
 
 if __name__ == "__main__":
-    run_from_config(DEFAULT_CONFIG_PATH)
+    run_from_config()

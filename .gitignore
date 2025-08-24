@@ -34,3 +34,4 @@ TestResults.xml
 *.m4w
 *.m4x
 *.m4y
+*output_srt/*
