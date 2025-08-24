@@ -91,6 +91,13 @@ def run_from_config(config_path: str = "config.json") -> None:
         if os.path.abspath(local_video_path) != os.path.abspath(dest_path):
             shutil.move(local_video_path, dest_path)
             local_video_path = dest_path
+        # Remove empty temporary download directory
+        tmp_download_dir = os.path.join(output_dir, "_downloads")
+        try:
+            if os.path.isdir(tmp_download_dir) and not os.listdir(tmp_download_dir):
+                os.rmdir(tmp_download_dir)
+        except Exception:
+            pass
     extracted_run_dir = os.path.join(run_dir, "extracted_audio")
     os.makedirs(extracted_run_dir, exist_ok=True)
 

@@ -1,14 +1,13 @@
 {
-  "path_to_vid": "https://www.youtube.com/watch?v=ZgsvfZuXfsI&t",
+  "path_to_vid": "https://www.youtube.com/watch?v=PJOI0SDvS6g",
   "source_language": "Arabic",
   "target_language": "Latin American Spanish",
   "output_dir": "output_srt",
   "tmp_dir": "tmp_segments",
-  "cleanup": true,
+  "cleanup": false,
   "transcription_models": ["gemini-2.5-pro"],
   "transcription_fallback_models": ["gemini-2.5-flash"],
-  "min_segment_minutes": 15,
+  "min_segment_minutes": 10,
   "translation_models": ["gemini-2.5-flash"],
-  "translation_fallback_models": ["gemini-2.5-flash-lite"],
-  "max_workers": 2
+  "translation_fallback_models": ["gemini-2.5-flash-lite"]
 }

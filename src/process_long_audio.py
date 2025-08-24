@@ -12,6 +12,7 @@ import google.genai as genai
 from .audio_utils import split_audio_by_duration
 from .upload_transcribe_translate_audio import transcribe_minimal
 from .minimal_format import assemble_srt_from_minimal_segments
+from .srt_validate import validate_and_optionally_fix
 from .audio_utils import get_audio_duration_ms
 
 
@@ -198,21 +199,78 @@ def process_audio_fixed_duration(
     os.makedirs(work_output_dir, exist_ok=True)
     os.makedirs(os.path.join(work_output_dir, "raw"), exist_ok=True)
     os.makedirs(os.path.join(work_output_dir, "translated"), exist_ok=True)
+    offsets_json_path = os.path.join(work_output_dir, "offsets.json")
 
     t0 = time.time()
     total_ms = get_audio_duration_ms(input_audio)
-    if total_ms < min_segment_minutes * 60 * 1000:
+
+    # If offsets.json exists and referenced segment files exist, reuse them
+    seg_paths: List[str] = []
+    offsets_ms: List[int] = []
+    seg_durations_ms: List[int] = []
+    if os.path.exists(offsets_json_path):
+        try:
+            with open(offsets_json_path, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+            saved_paths = saved.get("segment_paths") or []
+            saved_offsets = saved.get("offsets_ms") or []
+            saved_durations = saved.get("durations_ms") or []
+            if (
+                isinstance(saved_paths, list)
+                and isinstance(saved_offsets, list)
+                and len(saved_paths) == len(saved_offsets)
+                and (not saved_durations or len(saved_durations) == len(saved_paths))
+                and all(isinstance(p, str) and os.path.exists(p) for p in saved_paths)
+            ):
+                seg_paths = list(saved_paths)
+                offsets_ms = list(saved_offsets)
+                seg_durations_ms = list(saved_durations) if saved_durations else []
+                if verbose:
+                    print("[1] Reusing existing segments and offsets from offsets.json")
+        except Exception as e:
+            if verbose:
+                print(f"Warning: failed to load offsets.json, will re-split. Error: {e}")
+    if seg_paths:
+        # Already populated from offsets.json; ensure tmp_dir exists for downstream if needed
+        os.makedirs(tmp_dir, exist_ok=True)
+    elif total_ms < min_segment_minutes * 60 * 1000:
         if verbose:
             print("[1] Audio is short; skipping split...")
         seg_paths = [input_audio]
         offsets_ms = [0]
         seg_durations_ms = [total_ms]
+        # Persist offsets for later reuse
+        try:
+            with open(offsets_json_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "base": base,
+                    "total_ms": total_ms,
+                    "segment_paths": seg_paths,
+                    "offsets_ms": offsets_ms,
+                    "durations_ms": seg_durations_ms,
+                }, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            if verbose:
+                print(f"Warning: failed to write offsets file: {e}")
     else:
         if verbose:
             print("[1] Splitting by duration...", flush=True)
         seg_paths, offsets_ms, seg_durations_ms, total_ms = split_audio_by_duration(
             input_audio, min_segment_minutes, tmp_dir, verbose
         )
+        # Persist offsets for later reuse
+        try:
+            with open(offsets_json_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "base": base,
+                    "total_ms": total_ms,
+                    "segment_paths": seg_paths,
+                    "offsets_ms": offsets_ms,
+                    "durations_ms": seg_durations_ms,
+                }, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            if verbose:
+                print(f"Warning: failed to write offsets file: {e}")
     # Guard: ensure segments were created and valid
     if not seg_paths or any((not os.path.exists(p) or os.path.getsize(p) < 1024) for p in seg_paths):
         raise RuntimeError("Segmenting failed: missing or tiny segment files")
@@ -247,6 +305,23 @@ def process_audio_fixed_duration(
         f.write(srt_text)
     if verbose:
         print(f"Wrote {out_path}", flush=True)
+
+    # Auto-validate and overwrite with fixed version
+    try:
+        tmp_fixed = out_path + ".fixed.tmp"
+        _issues = validate_and_optionally_fix(out_path, out_fixed_path=tmp_fixed)
+        if os.path.exists(tmp_fixed):
+            try:
+                os.replace(tmp_fixed, out_path)
+                if verbose:
+                    bad_counts = {k: len(v) for k, v in _issues.items()}
+                    print(f"Validated and fixed SRT in place. Issues summary: {bad_counts}")
+            except Exception as e:
+                if verbose:
+                    print(f"Warning: failed to replace SRT with fixed version: {e}")
+    except Exception as e:
+        if verbose:
+            print(f"Warning: SRT validation step failed: {e}")
 
     if cleanup and verbose:
         print("[5] Cleanup", flush=True)
