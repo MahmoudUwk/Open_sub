@@ -80,7 +80,7 @@ def _transcribe_segments(
     output_dir: str,
     verbose: bool,
     transcribe_timeout_s: int,
-    retry_wait_s: int,
+    transcribe_retry_wait_s: int,
 ) -> List[str]:
     """Transcribe each audio segment sequentially."""
     minimal_outputs = []
@@ -97,8 +97,8 @@ def _transcribe_segments(
                 duration = time.time() - start_time
                 if err == "timeout":
                     print(f"[TR] seg {i} timeout {transcribe_timeout_s}s", flush=True)
-                    print(f"[TR] wait {retry_wait_s}s before retry...", flush=True)
-                    time.sleep(retry_wait_s)
+                    print(f"[TR] wait {transcribe_retry_wait_s}s before retry...", flush=True)
+                    time.sleep(transcribe_retry_wait_s)
                     continue  # Retry same segment indefinitely on timeout
                 if err:
                     # Print concise error with duration, then continue to next segment
@@ -106,11 +106,14 @@ def _transcribe_segments(
                     minimal_outputs.append("")
                     break
                 if not outcome.strip():
-                    # Empty but not an exception
-                    print(f"[TR] seg {i} empty {duration:.1f}s")
+                    # Empty but not an exception: wait and retry indefinitely
+                    print(f"[TR] seg {i} empty {duration:.1f}s", flush=True)
+                    print(f"[TR] wait {transcribe_retry_wait_s}s before retry...", flush=True)
+                    time.sleep(transcribe_retry_wait_s)
+                    continue
                 cleaned = clean_minimal_text(str(outcome))
                 minimal_outputs.append(cleaned)
-                # Always show a single concise success line
+                # Always show a single concise success line for non-empty output
                 print(f"[TR] seg {i} ok {duration:.1f}s")
                 raw_path = os.path.join(output_dir, "raw", f"segment_{i}_raw.txt")
                 with open(raw_path, "w", encoding="utf-8") as f:
@@ -305,6 +308,7 @@ def process_audio_fixed_duration(
     transcribe_timeout_s: Optional[int] = None,
     translate_timeout_s: Optional[int] = None,
     translate_max_retries: Optional[int] = None,
+    transcribe_retry_wait_s: Optional[int] = None,
     translate_retry_wait_s: Optional[int] = None,
 ) -> str:
     """Split audio by duration, transcribe, translate, and assemble SRT."""
@@ -317,6 +321,7 @@ def process_audio_fixed_duration(
     transcribe_timeout_s = int(transcribe_timeout_s or TIMEOUT_TRANSCRIBE_S)
     translate_timeout_s = int(translate_timeout_s or TIMEOUT_TRANSLATE_S)
     translate_max_retries = int(translate_max_retries or 3)
+    transcribe_retry_wait_s = int(transcribe_retry_wait_s or 20)
     translate_retry_wait_s = int(translate_retry_wait_s or 20)
 
     if not os.path.exists(input_audio):
@@ -422,7 +427,7 @@ def process_audio_fixed_duration(
         tr_t0 = time.time()
         minimal_outputs = _transcribe_segments(
             seg_paths, source_language, transcription_models, work_output_dir, verbose,
-            transcribe_timeout_s, translate_retry_wait_s,
+            transcribe_timeout_s, transcribe_retry_wait_s,
         )
         print(f"[TRANSCRIBE] done {(time.time()-tr_t0):.1f}s")
 

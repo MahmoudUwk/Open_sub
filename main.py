@@ -183,6 +183,7 @@ def run_from_config(config_path: str = "config.json") -> None:
     transcribe_timeout_s = config.get("transcribe_timeout_s")
     translate_timeout_s = config.get("translate_timeout_s")
     translate_max_retries = config.get("translate_max_retries")
+    transcribe_retry_wait_s = config.get("transcribe_retry_wait_s")
     translate_retry_wait_s = config.get("translate_retry_wait_s")
     
     out_path = process_audio_fixed_duration(
@@ -202,6 +203,7 @@ def run_from_config(config_path: str = "config.json") -> None:
         transcribe_timeout_s=transcribe_timeout_s,
         translate_timeout_s=translate_timeout_s,
         translate_max_retries=translate_max_retries,
+        transcribe_retry_wait_s=transcribe_retry_wait_s,
         translate_retry_wait_s=translate_retry_wait_s,
     )
     print(f"SRT: {out_path}")
