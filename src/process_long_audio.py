@@ -12,7 +12,7 @@ import google.genai as genai
 
 from .audio_utils import split_audio_by_duration
 from .upload_transcribe_translate_audio import transcribe_minimal, RATE_LIMIT_ERRORS
-from .minimal_format import assemble_srt_from_minimal_segments, clean_minimal_text
+from .minimal_format import assemble_srt_from_minimal_segments, clean_minimal_text, parse_minimal_lines, format_ms_xmys
 from .audio_utils import get_audio_duration_ms
 
 TIMEOUT_TRANSCRIBE_S = 120
@@ -136,6 +136,24 @@ def _translate_segments(
     """Translate each transcribed segment with configurable fallbacks."""
     translated_outputs = []
 
+    # Helper: extract simple bullet lines ("- some text"). If none, fallback to non-empty lines
+    def _extract_bullets(text: str) -> List[str]:
+        lines: List[str] = []
+        if not text:
+            return lines
+        for raw in text.splitlines():
+            l = raw.strip()
+            if not l:
+                continue
+            if l.startswith("- "):
+                lines.append(l[2:].strip())
+        if not lines:
+            for raw in text.splitlines():
+                l = raw.strip()
+                if l:
+                    lines.append(l)
+        return lines
+
     def _call_once(m: str, text: str) -> tuple[str, str | None]:
         try:
             client = genai.Client()
@@ -145,7 +163,7 @@ def _translate_segments(
         except Exception as e:
             return "", str(e)
 
-    def _call_with_retries(m: str, text: str, max_retries: int):
+    def _call_with_retries(m: str, text: str, max_retries: int, validator=None):
         attempts = 0
         timeouts = 0
         errors = 0
@@ -174,6 +192,13 @@ def _translate_segments(
                 else:
                     # Defensive: if library changes
                     t = (res or "") if isinstance(res, str) else ""
+                # Apply optional post-condition validator
+                if t and callable(validator):
+                    ok, reason = validator(t)
+                    if not ok:
+                        # Treat as failure and retry (counts against non-timeout attempts)
+                        t = ""
+                        err = reason or "validation_failed"
                 if not t:
                     # Consider empty as an error-like outcome for statistics
                     errors += 1
@@ -207,20 +232,23 @@ def _translate_segments(
             continue
 
         model = translation_models[i % len(translation_models)]
+        # Prepare bullet-only input (no timestamps). Preserve line order and count
+        items = parse_minimal_lines(clean_minimal_text(out))
+        orig_texts = [it["text"] for it in items]
+        time_pairs = [(int(it["start_ms"]), int(it["end_ms"])) for it in items]
+        bullet_input = "\n".join(f"- {t}" for t in orig_texts)
         prompt = (
             f"Translate from {source_language} to {target_language}.\n"
-            f"Output ONLY the lines with the SAME structure.\n"
-            f"Format per line: [start-end]: text\n"
-            f"- Timestamps are tokens like 9m32s839ms, 62s, 839ms.\n"
-            f"- Preserve timestamp tokens EXACTLY (numbers, brackets [], single hyphen -).\n"
-            f"- Do NOT reformat timestamps. Do NOT change/add/remove/reorder them. Translate text only.\n"
-            f"Input:\n{out}\n\n"
-            f"Output:\n"
+            f"You will receive N lines starting with '- ' (hyphens).\n"
+            f"Output ONLY N lines, in the SAME order, each starting with '- ' followed by the translated text.\n"
+            f"Do NOT add timestamps, numbering, brackets, or extra commentary.\n"
+            f"Input lines:\n{bullet_input}\n\n"
+            f"Output lines:\n"
         )
 
         # Call primary model with fixed-interval retries (no fallbacks)
         t0 = time.time()
-        trans_text, stats = _call_with_retries(model, prompt, max_retries=translate_max_retries)
+        trans_text, stats = _call_with_retries(model, prompt, max_retries=translate_max_retries, validator=None)
         dur = time.time() - t0
         if not trans_text.strip():
             last_err = stats.get("last_error") or ""
@@ -235,7 +263,24 @@ def _translate_segments(
             )
         else:
             print(f"[TL] seg {i} ok {dur:.1f}s attempts={stats.get('attempts', 0)}")
-        cleaned_t = clean_minimal_text(trans_text)
+        # Reinsert original timestamps to produce minimal lines again
+        translated_lines = _extract_bullets(trans_text)
+        if len(translated_lines) != len(orig_texts) and verbose:
+            print(
+                f"[TL] seg {i} line_count_mismatch exp={len(orig_texts)} got={len(translated_lines)}"
+            )
+        # Align counts: truncate or pad with original text
+        if len(translated_lines) < len(orig_texts):
+            translated_lines += orig_texts[len(translated_lines):]
+        else:
+            translated_lines = translated_lines[:len(orig_texts)]
+
+        minimal_lines = [
+            f"[{format_ms_xmys(s)}-{format_ms_xmys(e)}]: {t.strip()}"
+            for (s, e), t in zip(time_pairs, translated_lines)
+            if str(t).strip()
+        ]
+        cleaned_t = clean_minimal_text("\n".join(minimal_lines))
         translated_outputs.append(cleaned_t)
         translated_path = os.path.join(output_dir, "translated", f"segment_{i}_translated.txt")
         with open(translated_path, "w", encoding="utf-8") as f:
