@@ -3,6 +3,13 @@ from typing import List, Tuple, Dict
 
 from .minimal_format import ms_to_hhmmssms, parse_time_value_to_ms
 
+# Legacy module removed. Validation/correction now happens at source via
+# clean_minimal_text() in minimal_format, and final assembly is minimal.
+raise ImportError(
+    "srt_validate module has been removed. Validate/fix transcription and translation outputs at source "
+    "using clean_minimal_text; no final SRT post-validation."
+)
+
 def parse_srt(path: str) -> List[Tuple[int,int,str]]:
     entries: List[Tuple[int,int,str]] = []
     if not os.path.exists(path):

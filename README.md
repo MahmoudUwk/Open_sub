@@ -25,7 +25,6 @@ This project extracts audio from videos, transcribes and translates it using Gem
   - 2 = transcribe
   - 3 = translate
   - 4 = assemble
-  - 5 = validate
 
 ## How It Works
 1. **Config Load**: `main.py` loads `config.json`.
@@ -35,17 +34,16 @@ This project extracts audio from videos, transcribes and translates it using Gem
 5. **Transcribe**: Saves `raw/segment_{i}_raw.txt`.
 6. **Translate**: Saves `translated/segment_{i}_translated.txt`.
 7. **Assemble**: Writes `<base>.srt`.
-8. **Validate**: Fixes common SRT issues and overwrites if improved.
+   - Note: There is no final SRT validation step. Validation/fixing happens at the source by cleaning transcription/translation minimal outputs.
 
 ### Start/Resume behavior
 - Set `start_step` to start EXACTLY at that step:
   - `2 (transcribe)`: uses existing segments; transcribes now.
   - `3 (translate)`: loads `raw/*.txt`; translates now.
   - `4 (assemble)`: loads `translated/*.txt`; assembles now.
-  - `5 (validate)`: validates an existing SRT; if missing, it assembles from existing translations.
 - When `start_step >= 2`, the app auto-detects the latest run folder in `output_dir/` (by most recent `offsets.json`). If required assets are missing, it raises a clear error.
 
-Validations ensure steps succeed before proceeding.
+Minimal output cleaning ensures source outputs are valid before assembly; no post-assembly SRT validation.
 
 ## Running
 - Edit config.json.

@@ -1,15 +1,6 @@
 import os
-import re
 import subprocess
 from typing import List, Tuple, Optional
-
-
-TIMESTAMP_RE = re.compile(r"^(\d{2}):(\d{2}):(\d{2}),(\d{3})\s+-->\s+(\d{2}):(\d{2}):(\d{2}),(\d{3})$")
-
-
-def hhmmssms_to_ms(h: int, m: int, s: int, ms: int) -> int:
-    return ((h * 60 + m) * 60 + s) * 1000 + ms
-
 
 def ms_to_hhmmssms(total_ms: int) -> str:
     if total_ms < 0:
@@ -79,12 +70,6 @@ def compute_segment_offsets_ms(segment_paths: List[str], fallback_segment_ms: in
         dur = get_audio_duration_ms(path)
         running += dur if dur is not None else fallback_segment_ms
     return offsets
-
-
-def parse_srt_blocks(srt_text: str) -> List[Tuple[int, str, List[str]]]:
-    """Deprecated helper (not used). Returns empty list to avoid dead code paths."""
-    return []
-
 
 def split_audio_by_duration(
     input_audio: str,

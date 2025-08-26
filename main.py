@@ -61,7 +61,7 @@ def run_from_config(config_path: str = "config.json") -> None:
     verbose = config.get("verbose", False)
     # Numeric start step with mapping for clarity
     start_step_num = int(config.get("start_step", 0))
-    steps_map = {0: "download", 1: "split", 2: "transcribe", 3: "translate", 4: "assemble", 5: "validate"}
+    steps_map = {0: "download", 1: "split", 2: "transcribe", 3: "translate", 4: "assemble"}
     start_step_name = steps_map.get(start_step_num, "download")
 
     # Recreate fresh directories (root only); run-specific subdir will be created later
@@ -95,7 +95,7 @@ def run_from_config(config_path: str = "config.json") -> None:
             return None, None
 
     # Determine whether to resume or start from scratch based on start_step
-    if start_step_name in ("transcribe", "translate", "assemble", "validate"):
+    if start_step_name in ("transcribe", "translate", "assemble"):
         run_dir, base_name = _find_latest_run_dir(output_dir)
         if not run_dir:
             raise RuntimeError("start_step>='transcribe' but no existing run directory with offsets.json found in output_dir")
@@ -150,7 +150,7 @@ def run_from_config(config_path: str = "config.json") -> None:
 
     # Extract audio from downloaded video into run_dir/extracted_audio
     audio_output_path = os.path.join(extracted_run_dir, base_name + ".m4a")
-    if start_step_name in ("transcribe", "translate", "assemble", "validate"):
+    if start_step_name in ("transcribe", "translate", "assemble"):
         if os.path.exists(audio_output_path):
             print(f"[EXTRACT] resume {audio_output_path}")
             audio_path = audio_output_path

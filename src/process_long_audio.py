@@ -361,7 +361,7 @@ def process_audio_fixed_duration(
     print(f"[SPLIT] ready {len(seg_paths)} segs {(time.time()-split_t0):.1f}s")
 
     minimal_outputs: List[str]
-    if start_step.lower() in ("translate", "assemble", "validate"):
+    if start_step.lower() in ("translate", "assemble"):
         # Resume from saved raw transcripts
         print("[TRANSCRIBE] resume", flush=True)
         minimal_outputs = []
@@ -385,7 +385,7 @@ def process_audio_fixed_duration(
     if not any(s.strip() for s in minimal_outputs):
         raise RuntimeError("Transcription failed: all segments empty")
 
-    if start_step.lower() in ("assemble", "validate"):
+    if start_step.lower() in ("assemble",):
         print("[TRANSLATE] resume", flush=True)
         translated_outputs: List[str] = []
         for i in range(len(minimal_outputs)):
@@ -408,7 +408,7 @@ def process_audio_fixed_duration(
         raise RuntimeError("Translation failed: all segments empty")
 
     out_path = os.path.join(work_output_dir, base + ".srt")
-    if start_step.lower() == "validate" and os.path.exists(out_path):
+    if start_step.lower() == "assemble" and os.path.exists(out_path):
         print("[ASSEMBLE] skip (existing SRT)", flush=True)
     else:
         print("[ASSEMBLE] start", flush=True)
