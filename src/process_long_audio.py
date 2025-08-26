@@ -12,8 +12,7 @@ import google.genai as genai
 
 from .audio_utils import split_audio_by_duration
 from .upload_transcribe_translate_audio import transcribe_minimal, RATE_LIMIT_ERRORS
-from .minimal_format import assemble_srt_from_minimal_segments
-from .srt_validate import validate_and_optionally_fix
+from .minimal_format import assemble_srt_from_minimal_segments, clean_minimal_text
 from .audio_utils import get_audio_duration_ms
 
 TIMEOUT_TRANSCRIBE_S = 120
@@ -109,7 +108,8 @@ def _transcribe_segments(
                 if not outcome.strip():
                     # Empty but not an exception
                     print(f"[TR] seg {i} empty {duration:.1f}s")
-                minimal_outputs.append(str(outcome))
+                cleaned = clean_minimal_text(str(outcome))
+                minimal_outputs.append(cleaned)
                 # Always show a single concise success line
                 print(f"[TR] seg {i} ok {duration:.1f}s")
                 raw_path = os.path.join(output_dir, "raw", f"segment_{i}_raw.txt")
@@ -211,9 +211,9 @@ def _translate_segments(
             f"Translate from {source_language} to {target_language}.\n"
             f"Output ONLY the lines with the SAME structure.\n"
             f"Format per line: [start-end]: text\n"
-            f"- start,end are TOTAL SECONDS with milliseconds (e.g., [367.123-375.163]).\n"
-            f"- Preserve timestamps EXACTLY (numbers, brackets [], single hyphen -).\n"
-            f"- Do NOT change, add, remove, or reorder timestamps. Translate text only.\n"
+            f"- Timestamps are tokens like 9m32s839ms, 62s, 839ms.\n"
+            f"- Preserve timestamp tokens EXACTLY (numbers, brackets [], single hyphen -).\n"
+            f"- Do NOT reformat timestamps. Do NOT change/add/remove/reorder them. Translate text only.\n"
             f"Input:\n{out}\n\n"
             f"Output:\n"
         )
@@ -235,10 +235,11 @@ def _translate_segments(
             )
         else:
             print(f"[TL] seg {i} ok {dur:.1f}s attempts={stats.get('attempts', 0)}")
-        translated_outputs.append(trans_text)
+        cleaned_t = clean_minimal_text(trans_text)
+        translated_outputs.append(cleaned_t)
         translated_path = os.path.join(output_dir, "translated", f"segment_{i}_translated.txt")
         with open(translated_path, "w", encoding="utf-8") as f:
-            f.write(trans_text)
+            f.write(cleaned_t)
         # keep file-system noise out of console
 
     return translated_outputs
@@ -368,7 +369,7 @@ def process_audio_fixed_duration(
             raw_path = os.path.join(work_output_dir, "raw", f"segment_{i}_raw.txt")
             try:
                 with open(raw_path, "r", encoding="utf-8") as f:
-                    minimal_outputs.append(f.read())
+                    minimal_outputs.append(clean_minimal_text(f.read()))
             except Exception:
                 minimal_outputs.append("")
     else:
@@ -391,7 +392,7 @@ def process_audio_fixed_duration(
             t_path = os.path.join(work_output_dir, "translated", f"segment_{i}_translated.txt")
             try:
                 with open(t_path, "r", encoding="utf-8") as f:
-                    translated_outputs.append(f.read())
+                    translated_outputs.append(clean_minimal_text(f.read()))
             except Exception:
                 translated_outputs.append("")
     else:
@@ -418,19 +419,7 @@ def process_audio_fixed_duration(
             f.write(srt_text)
         print(f"[ASSEMBLE] wrote {out_path}")
 
-    # Auto-validate and overwrite with fixed version
-    try:
-        tmp_fixed = out_path + ".fixed.tmp"
-        _issues = validate_and_optionally_fix(out_path, out_fixed_path=tmp_fixed)
-        if os.path.exists(tmp_fixed):
-            try:
-                os.replace(tmp_fixed, out_path)
-                bad_counts = {k: len(v) for k, v in _issues.items()}
-                print(f"[VALIDATE] fixed {bad_counts}")
-            except Exception as e:
-                print(f"[VALIDATE] replace-error: {e}")
-    except Exception as e:
-        print(f"[VALIDATE] error: {e}")
+    # No SRT post-validation: we validate/fix at source (transcription/translation minimal outputs)
 
     if cleanup:
         try:

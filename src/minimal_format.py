@@ -1,83 +1,45 @@
-"""Functions for parsing and assembling SRT subtitle files."""
+"""XmYsZms-only minimal format parsing and SRT assembly."""
 
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-TIME_RE_HHMMSS_MS = re.compile(r"^(\d{2}):(\d{2}):(\d{2})([.,](\d{1,3}))?$")
+# Strict bracketed minimal line: [<start>-<end>]: text
 TIME_LINE_RE = re.compile(r'^\s*\[(.+?)\s*-\s*(.+?)\]\s*:\s*(.+?)\s*$')
 
-def parse_time_value_to_ms(value: Any) -> Optional[int]:
-    """Parse a flexible time value into milliseconds.
+# Strict token: optional minutes, optional seconds, optional milliseconds
+TIME_TOKEN_RE = re.compile(
+    r"^\s*(?:(\d+)\s*m)?\s*(?:(\d{1,2})\s*s)?\s*(?:(\d{1,3})\s*ms)?\s*$",
+    re.IGNORECASE,
+)
 
-    Accepts:
-    - HH:MM:SS[,.]ms
-    - MM:SS[,.]ms
-    - SS[,.]ms
-    - integer milliseconds or seconds (floats)
+def parse_time_value_to_ms(value: Any) -> Optional[int]:
+    """Parse XmYsZms-like token into milliseconds.
+
+    Accepted examples:
+    - 9m32s839ms
+    - 1m2s
+    - 32s
+    - 839ms
     """
     if value is None:
         return None
     if isinstance(value, (int, float)):
-        return max(0, int(round(value * 1000)) if isinstance(value, float) else int(value))
+        # Treat as milliseconds if int, seconds if float
+        return max(0, int(round(value)) if isinstance(value, int) else int(round(value * 1000)))
     if isinstance(value, str):
         v = value.strip()
-        # Normalize Arabic-Indic digits and punctuation to ASCII
-        # U+0660-0669 (٠١٢٣٤٥٦٧٨٩), U+06F0-06F9 (۰۱۲۳۴۵۶۷۸۹)
-        def _norm_digits(s: str) -> str:
-            out_chars = []
-            for ch in s:
-                code = ord(ch)
-                if 0x0660 <= code <= 0x0669:
-                    out_chars.append(chr(ord('0') + (code - 0x0660)))
-                elif 0x06F0 <= code <= 0x06F9:
-                    out_chars.append(chr(ord('0') + (code - 0x06F0)))
-                elif ch in ('،',):  # Arabic comma
-                    out_chars.append(',')
-                else:
-                    out_chars.append(ch)
-            return ''.join(out_chars)
-        v = _norm_digits(v)
-        # Handle formats like '1m2s' -> '1:2'
-        v = v.replace('m', ':').replace('s', '')
-
-        # Try strict HH:MM:SS first
-        m = TIME_RE_HHMMSS_MS.match(v)
-        if m:
-            hh, mm, ss, _, ms_part = m.groups()
-            ms = int((ms_part or '0').ljust(3, '0'))
-            return ((int(hh) * 60 + int(mm)) * 60 + int(ss)) * 1000 + ms
-        # Flexible parsing for MM:SS, SS and decimal seconds
-        vv = v.replace(',', '.')
-        if ':' in vv:
-            parts = vv.split(':')
-            try:
-                if len(parts) == 3:
-                    h = int(parts[0])
-                    m2 = int(parts[1])
-                    s = float(parts[2])
-                elif len(parts) == 2:
-                    h = 0
-                    m2 = int(parts[0])
-                    s = float(parts[1])
-                else:
-                    h = 0
-                    m2 = 0
-                    s = float(parts[-1])
-                total_ms = int(round(((h * 60 + m2) * 60 + s) * 1000))
-                return max(0, total_ms)
-            except ValueError:
-                return None
-        try:
-            # Plain seconds or milliseconds as float or int
-            if '.' in vv:
-                return max(0, int(round(float(vv) * 1000)))
-            return max(0, int(vv))
-        except ValueError:
+        m = TIME_TOKEN_RE.match(v)
+        if not m:
             return None
+        mm = int(m.group(1) or 0)
+        ss = int(m.group(2) or 0)
+        ms_part = (m.group(3) or '0')
+        ms = int(ms_part.ljust(3, '0'))
+        return ((mm * 60) + ss) * 1000 + ms
     return None
 
 def ms_to_hhmmssms(total_ms: int) -> str:
-    """Convert milliseconds to an SRT timestamp string."""
+    """Convert milliseconds to a standard SRT timestamp string HH:MM:SS,ms."""
     if total_ms < 0:
         total_ms = 0
     ms = total_ms % 1000
@@ -95,28 +57,22 @@ def _normalize_text_for_compare(s: str) -> str:
     return " ".join("".join(c for c in s2 if not _ud.category(c).startswith(('P', 'M'))).split())
 
 def parse_minimal_lines(text: str) -> List[Dict[str, Any]]:
-    """Parse relaxed timed-line formats into a unified list of subtitle dicts.
+    """Parse minimal lines strictly: [XmYsZms-XmYsZms]: text.
 
-    Accepted forms per line:
-    - [start - end]: text            (canonical minimal format)
-    - [start - end] text             (missing colon)
-    - start - end: text              (no brackets)
-    - start to end: text             (no brackets, 'to')
-    - start --> end text             (single-line arrow)
-    Where start/end may be HH:MM:SS,mmm | HH:MM:SS.mmm | MM:SS | SS(.mmm)
+    - Tolerates surrounding quotes on the whole line.
+    - Ignores lines that don't match or have invalid times.
     """
     items: List[Dict[str, Any]] = []
     if not text:
         return items
 
-    # Precompiled relaxed patterns
-    BRACKET_NO_COLON = re.compile(r"^\s*\[(.+?)\s*-\s*(.+?)\]\s*(.+?)\s*$")
-    NO_BRACKETS_COLON = re.compile(r"^\s*(.+?)\s*-\s*(.+?)\s*:\s*(.+?)\s*$")
-    NO_BRACKETS_TO = re.compile(r"^\s*(.+?)\s+to\s+(.+?)\s*:\s*(.+?)\s*$", re.IGNORECASE)
-    ARROW_SINGLE_LINE = re.compile(r"^\s*(.+?)\s*-->\s*(.+?)\s*(.+?)?\s*$")
-
     for raw in text.strip().splitlines():
         line = raw.strip()
+        # Tolerate lines wrapped in matching quotes (some models echo quotes from instructions)
+        if (len(line) >= 2 and ((line[0] == line[-1]) and line[0] in ('"', "'", '“', '”'))):
+            # Handle symmetric fancy quotes as well
+            if (line[0] == '“' and line[-1] == '”') or (line[0] in ('"', "'") and line[-1] == line[0]):
+                line = line[1:-1].strip()
         if not line:
             continue
 
@@ -127,23 +83,6 @@ def parse_minimal_lines(text: str) -> List[Dict[str, Any]]:
         m = TIME_LINE_RE.match(line)
         if m:
             start_raw, end_raw, content = m.groups()
-        else:
-            m2 = BRACKET_NO_COLON.match(line)
-            if m2:
-                start_raw, end_raw, content = m2.groups()
-            else:
-                m3 = NO_BRACKETS_COLON.match(line)
-                if m3:
-                    start_raw, end_raw, content = m3.groups()
-                else:
-                    m4 = NO_BRACKETS_TO.match(line)
-                    if m4:
-                        start_raw, end_raw, content = m4.groups()
-                    else:
-                        m5 = ARROW_SINGLE_LINE.match(line)
-                        if m5:
-                            start_raw, end_raw, maybe_text = m5.groups()
-                            content = (maybe_text or "").strip()
 
         if start_raw is None or end_raw is None or content is None:
             continue
@@ -160,104 +99,67 @@ def parse_minimal_lines(text: str) -> List[Dict[str, Any]]:
     items.sort(key=lambda d: (d["start_ms"], d["end_ms"]))
     return items
 
-def parse_srt_blocks(text: str) -> List[Dict[str, Any]]:
-    """Parse standard SRT into items.
+def format_ms_xmys(total_ms: int) -> str:
+    """Format milliseconds as XmYsZms, omitting zero components."""
+    if total_ms < 0:
+        total_ms = 0
+    ms = total_ms % 1000
+    total_sec = total_ms // 1000
+    s = total_sec % 60
+    m = total_sec // 60
+    parts: List[str] = []
+    if m:
+        parts.append(f"{m}m")
+    if s or m:
+        parts.append(f"{s}s")
+    if ms:
+        parts.append(f"{ms}ms")
+    # If everything zero, return 0s
+    return "".join(parts) if parts else "0s"
 
-    Accepts blocks of the form:
-        index\n
-        HH:MM:SS,mmm --> HH:MM:SS,mmm\n
-        text lines...\n
+
+def clean_minimal_text(text: str) -> str:
+    """Validate and fix minimal transcript/translation lines.
+
+    - Keeps only lines of the form [start-end]: text with XmYsZms times.
+    - Strips surrounding quotes.
+    - Ensures end > start; if swapped, swap back.
+    - Re-emits in canonical formatting using XmYsZms.
     """
-    items: List[Dict[str, Any]] = []
-    blocks = re.split(r"\n\s*\n", text.strip())
-    for blk in blocks:
-        lines = [ln.strip() for ln in blk.splitlines() if ln.strip()]
-        if not lines:
+    items = parse_minimal_lines(text)
+    cleaned: List[str] = []
+    for it in items:
+        s = it["start_ms"]
+        e = it["end_ms"]
+        t = it["text"].strip()
+        if not t:
             continue
-        # Optional numeric index in first line
-        if len(lines) >= 2 and re.match(r"^\d+$", lines[0]):
-            ts_line = lines[1]
-            content_lines = lines[2:]
-        else:
-            ts_line = lines[0] if lines else ""
-            content_lines = lines[1:]
-        m = re.match(r"^(\d{2}:\d{2}:\d{2}[,.]\d{1,3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{1,3})$", ts_line)
-        if not m:
-            continue
-        start_ms = parse_time_value_to_ms(m.group(1))
-        end_ms = parse_time_value_to_ms(m.group(2))
-        txt = " ".join(content_lines).strip()
-        if start_ms is None or end_ms is None or end_ms <= start_ms or not txt:
-            continue
-        items.append({"start_ms": start_ms, "end_ms": end_ms, "text": txt})
-    items.sort(key=lambda d: (d["start_ms"], d["end_ms"]))
-    return items
+        if e <= s:
+            s, e = e, s  # swap
+        cleaned.append(f"[{format_ms_xmys(s)}-{format_ms_xmys(e)}]: {t}")
+    return "\n".join(cleaned)
+
 
 def assemble_srt_from_minimal_segments(
     segment_outputs: List[str],
     offsets_ms: List[int],
 ) -> str:
-    """Assemble a final SRT file from multiple timed-line segment outputs by appending and shifting."""
-    entries = []
-    for idx, text in enumerate(segment_outputs):
-        # Strip conversational intros or other non-subtitle text
-        lines = text.strip().splitlines()
-        first_subtitle_line_idx = -1
-        for i, line in enumerate(lines):
-            if "-->" in line or ("[" in line and "]" in line and "-" in line):
-                first_subtitle_line_idx = i
-                break
-        
-        cleaned_text = text
-        if first_subtitle_line_idx != -1:
-            cleaned_text = "\n".join(lines[first_subtitle_line_idx:])
+    """Assemble final SRT by strictly parsing minimal lines and offsetting.
 
-        items = parse_minimal_lines(cleaned_text)
-        if not items:
-            # Fallback: try parsing as standard SRT blocks (models sometimes drift format)
-            items = parse_srt_blocks(cleaned_text)
+    No rebasing, clamping, or legacy fallbacks.
+    """
+    entries: List[Tuple[int, int, str]] = []
+    for idx, text in enumerate(segment_outputs):
+        items = parse_minimal_lines(text)
         if not items:
             continue
-
-        offset = offsets_ms[idx]
-
-        # Detect and fix absolute timestamps by rebasing them
-        if items:
-            first_start_ms = items[0]["start_ms"]
-            # Heuristic: if first timestamp is near the segment's global offset,
-            # assume all timestamps in the segment are absolute.
-            if abs(first_start_ms - offset) < 30000:  # 30-second tolerance
-                for item in items:
-                    item["start_ms"] -= offset
-                    item["end_ms"] -= offset
-        
-        # Infer this segment's length using the next offset when available
-        seg_len = None
-        if idx + 1 < len(offsets_ms):
-            nxt = offsets_ms[idx + 1]
-            if nxt > offset:
-                seg_len = nxt - offset
-        # Normalize local times that drift beyond the segment window (e.g., 10:01 within a 10-min segment)
-        def _normalize_local(ms: int) -> int:
-            # Clamp to [0, seg_len-1] rather than wrapping by modulo to avoid
-            # creating artificial time jumps across segment boundaries.
-            if seg_len is None:
-                return 0 if ms < 0 else ms
-            if ms < 0:
-                return 0
-            if ms >= seg_len:
-                return max(0, seg_len - 1)
-            return ms
+        off = offsets_ms[idx]
         for it in items:
-            ls = _normalize_local(it["start_ms"])
-            le = _normalize_local(it["end_ms"])
-            # Ensure end after start minimally
-            if le <= ls:
-                le = ls + 1
-            start = ls + offset
-            end = le + offset
-            entries.append((start, end, it["text"]))
+            s = it["start_ms"] + off
+            e = it["end_ms"] + off
+            if e <= s:
+                continue
+            entries.append((s, e, it["text"]))
     entries.sort(key=lambda t: (t[0], t[1]))
-    srt_lines = [f"{i+1}\n{ms_to_hhmmssms(s)} --> {ms_to_hhmmssms(e)}\n{c}\n"
-                 for i, (s, e, c) in enumerate(entries)]
+    srt_lines = [f"{i+1}\n{ms_to_hhmmssms(s)} --> {ms_to_hhmmssms(e)}\n{c}\n" for i, (s, e, c) in enumerate(entries)]
     return "\n".join(srt_lines)

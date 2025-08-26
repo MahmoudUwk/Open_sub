@@ -17,7 +17,7 @@ TRANSCRIPTION_PROMPT_TEMPLATE = (
     """Transcribe speech in {source_language}.
 Output ONLY lines in this EXACT format: "[start-end]: text"
 Rules:
-- start,end are in format total_seconds.milliseconds. Example: 75.123 would be 75 seconds and 123 milliseconds.
+- start,end are in format XmYsZms. Example 9m32s839ms is 9 minutes, 32 seconds, and 839 milliseconds.
 - Group words into readable phrases suitible for subtitles (max 1–2 sentences per line).
 """
 )
