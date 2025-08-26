@@ -3,16 +3,15 @@
 import os
 import json
 import time
+import multiprocessing as mp
 import datetime
 import shutil
 from typing import List, Optional
-from threading import Thread
-from queue import Queue
 
 import google.genai as genai
 
 from .audio_utils import split_audio_by_duration
-from .upload_transcribe_translate_audio import transcribe_minimal
+from .upload_transcribe_translate_audio import transcribe_minimal, RATE_LIMIT_ERRORS
 from .minimal_format import assemble_srt_from_minimal_segments
 from .srt_validate import validate_and_optionally_fix
 from .audio_utils import get_audio_duration_ms
@@ -21,19 +20,27 @@ TIMEOUT_TRANSCRIBE_S = 120
 TIMEOUT_TRANSLATE_S = 90
 
 def _call_with_timeout(func, timeout_s: int, *args, **kwargs):
-    """Run func with a wall-clock timeout. Returns (result, err_str or None).
-    On timeout, returns (None, 'timeout').
+    """Run func with a hard timeout using a child process.
+    Returns (result, err_str or None). On timeout, returns (None, 'timeout').
     """
-    q: Queue = Queue(maxsize=1)
-    def runner():
+    q = mp.Queue(maxsize=1)
+
+    def _runner(q):
         try:
-            q.put((func(*args, **kwargs), None))
+            res = func(*args, **kwargs)
+            q.put((res, None))
         except Exception as e:
             q.put((None, str(e)))
-    t = Thread(target=runner, daemon=True)
-    t.start()
-    t.join(timeout_s)
-    if t.is_alive():
+
+    p = mp.Process(target=_runner, args=(q,), daemon=True)
+    p.start()
+    p.join(timeout_s)
+    if p.is_alive():
+        try:
+            p.terminate()
+        except Exception:
+            pass
+        p.join(1)
         return None, "timeout"
     try:
         return q.get_nowait()
@@ -73,38 +80,45 @@ def _transcribe_segments(
     transcription_models: List[str],
     output_dir: str,
     verbose: bool,
+    transcribe_timeout_s: int,
+    retry_wait_s: int,
 ) -> List[str]:
     """Transcribe each audio segment sequentially."""
     minimal_outputs = []
     for i, seg_path in enumerate(seg_paths):
         model = transcription_models[i % len(transcription_models)]
         try:
-            start_time = time.time()
-            outcome, err = _call_with_timeout(
-                _call_model_for_segment,
-                TIMEOUT_TRANSCRIBE_S,
-                seg_path, source_language, model, _guess_mime_type_from_extension(seg_path), verbose
-            )
-            duration = time.time() - start_time
-            if err == "timeout":
-                if verbose:
-                    print(f"[TR] seg {i} timeout after {TIMEOUT_TRANSCRIBE_S}s")
-                minimal_outputs.append("")
-                continue
-            if err:
-                raise RuntimeError(err)
-            if not outcome.strip():
-                if verbose:
-                    print(f"[TR] seg {i} empty output")
-            minimal_outputs.append(str(outcome))
-            if verbose:
-                print(f"[TR] seg {i} ok {duration:.1f}s chars={len(outcome)}")
-            raw_path = os.path.join(output_dir, "raw", f"segment_{i}_raw.txt")
-            with open(raw_path, "w", encoding="utf-8") as f:
-                f.write(outcome)
+            while True:
+                start_time = time.time()
+                outcome, err = _call_with_timeout(
+                    _call_model_for_segment,
+                    transcribe_timeout_s,
+                    seg_path, source_language, model, _guess_mime_type_from_extension(seg_path), verbose
+                )
+                duration = time.time() - start_time
+                if err == "timeout":
+                    print(f"[TR] seg {i} timeout {transcribe_timeout_s}s", flush=True)
+                    print(f"[TR] wait {retry_wait_s}s before retry...", flush=True)
+                    time.sleep(retry_wait_s)
+                    continue  # Retry same segment indefinitely on timeout
+                if err:
+                    # Print concise error with duration, then continue to next segment
+                    print(f"[TR] seg {i} error {duration:.1f}s: {err}")
+                    minimal_outputs.append("")
+                    break
+                if not outcome.strip():
+                    # Empty but not an exception
+                    print(f"[TR] seg {i} empty {duration:.1f}s")
+                minimal_outputs.append(str(outcome))
+                # Always show a single concise success line
+                print(f"[TR] seg {i} ok {duration:.1f}s")
+                raw_path = os.path.join(output_dir, "raw", f"segment_{i}_raw.txt")
+                with open(raw_path, "w", encoding="utf-8") as f:
+                    f.write(outcome)
+                break
         except Exception as e:
-            if verbose:
-                print(f"[TR] seg {i} error: {str(e)}")
+            # Unexpected error in wrapper
+            print(f"[TR] seg {i} error: {str(e)}")
             minimal_outputs.append("")
     return minimal_outputs
 
@@ -115,38 +129,81 @@ def _translate_segments(
     translation_models: List[str],
     output_dir: str,
     verbose: bool,
+    translate_timeout_s: int,
+    translate_max_retries: int,
+    translate_retry_wait_s: int,
 ) -> List[str]:
     """Translate each transcribed segment with configurable fallbacks."""
     translated_outputs = []
-    client = genai.Client()
 
     def _call_once(m: str, text: str) -> tuple[str, str | None]:
         try:
+            client = genai.Client()
             response = client.models.generate_content(model=m, contents=text)
             t = (getattr(response, "text", None) or "").strip()
             return t, None
         except Exception as e:
             return "", str(e)
 
-    def _call_with_retries(m: str, text: str, max_retries: int = 3) -> str:
-        for attempt in range(1, max_retries + 1):
-            t, err = _call_with_timeout(_call_once, TIMEOUT_TRANSLATE_S, m, text)
-            if t:
-                return t
-            if verbose:
-                msg = err or "empty"
-                print(f"[TL] {m} attempt {attempt}/{max_retries}: {msg}")
-            if attempt < max_retries:
+    def _call_with_retries(m: str, text: str, max_retries: int):
+        attempts = 0
+        timeouts = 0
+        errors = 0
+        last_err = None
+        non_timeout_attempts = 0
+        while True:
+            attempt = attempts + 1
+            attempts += 1
+            a_t0 = time.time()
+            res, to_err = _call_with_timeout(_call_once, translate_timeout_s, m, text)
+            a_dur = time.time() - a_t0
+            t = ""
+            err = to_err
+            if to_err == "timeout":
+                timeouts += 1
+                print(f"[TL] {m} attempt {attempt}/{max_retries}: timeout {a_dur:.1f}s", flush=True)
+                # Always retry on timeout (do not count against max_retries)
+                print(f"[TL] wait {translate_retry_wait_s}s before retry...", flush=True)
+                time.sleep(translate_retry_wait_s)
+                continue
+            elif to_err is None:
+                # _call_once returns (text, err)
+                if isinstance(res, tuple) and len(res) == 2:
+                    t, call_err = res
+                    err = call_err
+                else:
+                    # Defensive: if library changes
+                    t = (res or "") if isinstance(res, str) else ""
+                if not t:
+                    # Consider empty as an error-like outcome for statistics
+                    errors += 1
+                    non_timeout_attempts += 1
+                    last_err = (err or "empty")
+                    if verbose:
+                        msg = err or "empty"
+                        print(f"[TL] {m} attempt {attempt}/{max_retries}: {msg} {a_dur:.1f}s")
+            else:
+                # Exception path
+                errors += 1
+                non_timeout_attempts += 1
+                last_err = err
                 if verbose:
-                    print("[TL] wait 20s before retry...")
-                time.sleep(20)
-        return ""
+                    print(f"[TL] {m} attempt {attempt}/{max_retries}: {err} {a_dur:.1f}s")
+
+            if t:
+                return t, {"attempts": attempts, "timeouts": timeouts, "errors": errors, "last_error": last_err}
+
+            # Stop if exceeded non-timeout retries; otherwise wait and retry
+            if non_timeout_attempts >= max_retries:
+                return "", {"attempts": attempts, "timeouts": timeouts, "errors": errors, "last_error": last_err}
+            if verbose:
+                print(f"[TL] wait {translate_retry_wait_s}s before retry...")
+            time.sleep(translate_retry_wait_s)
 
     for i, out in enumerate(minimal_outputs):
         if not out.strip():
             translated_outputs.append("")
-            if verbose:
-                print(f"[TL] seg {i} skip (empty input)")
+            print(f"[TL] seg {i} skip-empty")
             continue
 
         model = translation_models[i % len(translation_models)]
@@ -159,13 +216,23 @@ def _translate_segments(
         )
 
         # Call primary model with fixed-interval retries (no fallbacks)
-        trans_text = _call_with_retries(model, prompt, max_retries=4)
+        t0 = time.time()
+        trans_text, stats = _call_with_retries(model, prompt, max_retries=translate_max_retries)
+        dur = time.time() - t0
         if not trans_text.strip():
-            if verbose:
-                print(f"[TL] seg {i} empty output")
+            last_err = stats.get("last_error") or ""
+            err_low = last_err.lower() if isinstance(last_err, str) else ""
+            rate_limited = any(k.lower() in err_low for k in RATE_LIMIT_ERRORS) if last_err else False
+            tag = "rate_limit" if rate_limited else "empty"
+            # Show concise summary with counts and last error snippet
+            snippet = (last_err[:120] + "...") if isinstance(last_err, str) and len(last_err) > 120 else (last_err or "")
+            print(
+                f"[TL] seg {i} {tag} {dur:.1f}s attempts={stats.get('attempts', 0)} "
+                f"timeouts={stats.get('timeouts', 0)} errors={stats.get('errors', 0)} last_err={snippet!r}"
+            )
+        else:
+            print(f"[TL] seg {i} ok {dur:.1f}s attempts={stats.get('attempts', 0)}")
         translated_outputs.append(trans_text)
-        if verbose:
-            print(f"[TL] seg {i} ok chars={len(trans_text)}")
         translated_path = os.path.join(output_dir, "translated", f"segment_{i}_translated.txt")
         with open(translated_path, "w", encoding="utf-8") as f:
             f.write(trans_text)
@@ -184,12 +251,24 @@ def process_audio_fixed_duration(
     verbose: bool = True,
     transcription_models: Optional[List[str]] = None,
     translation_models: Optional[List[str]] = None,
+    start_step: str = "split",
+    # Configurable timeouts/retry settings (defaults preserve current behavior)
+    transcribe_timeout_s: Optional[int] = None,
+    translate_timeout_s: Optional[int] = None,
+    translate_max_retries: Optional[int] = None,
+    translate_retry_wait_s: Optional[int] = None,
 ) -> str:
     """Split audio by duration, transcribe, translate, and assemble SRT."""
     if not transcription_models:
         transcription_models = ["gemini-2.5-pro"]
     if not translation_models:
         translation_models = ["gemini-2.5-pro"]
+
+    # Resolve timeout/retry defaults
+    transcribe_timeout_s = int(transcribe_timeout_s or TIMEOUT_TRANSCRIBE_S)
+    translate_timeout_s = int(translate_timeout_s or TIMEOUT_TRANSLATE_S)
+    translate_max_retries = int(translate_max_retries or 3)
+    translate_retry_wait_s = int(translate_retry_wait_s or 20)
 
     if not os.path.exists(input_audio):
         raise FileNotFoundError(f"Input audio not found: {input_audio}")
@@ -203,6 +282,8 @@ def process_audio_fixed_duration(
     offsets_json_path = os.path.join(work_output_dir, "offsets.json")
 
     t0 = time.time()
+    split_t0 = t0
+    print("[SPLIT] start", flush=True)
     total_ms = get_audio_duration_ms(input_audio)
 
     # If offsets.json exists and referenced segment files exist, reuse them
@@ -226,17 +307,15 @@ def process_audio_fixed_duration(
                 seg_paths = list(saved_paths)
                 offsets_ms = list(saved_offsets)
                 seg_durations_ms = list(saved_durations) if saved_durations else []
-                if verbose:
-                    print("[1] Reusing existing segments and offsets from offsets.json")
+                print(f"[SPLIT] reuse {len(seg_paths)} segs")
         except Exception as e:
             if verbose:
-                print(f"Warning: failed to load offsets.json, will re-split. Error: {e}")
+                print(f"[SPLIT] cannot reuse: {e}")
     if seg_paths:
         # Already populated from offsets.json; ensure tmp_dir exists for downstream if needed
         os.makedirs(tmp_dir, exist_ok=True)
     elif total_ms < min_segment_minutes * 60 * 1000:
-        if verbose:
-            print("[1] Audio is short; skipping split...")
+        print("[SPLIT] skip-short 1 seg")
         seg_paths = [input_audio]
         offsets_ms = [0]
         seg_durations_ms = [total_ms]
@@ -255,7 +334,7 @@ def process_audio_fixed_duration(
                 print(f"Warning: failed to write offsets file: {e}")
     else:
         if verbose:
-            print("[1] Splitting by duration...", flush=True)
+            print("[SPLIT] splitting...", flush=True)
         seg_paths, offsets_ms, seg_durations_ms, total_ms = split_audio_by_duration(
             input_audio, min_segment_minutes, tmp_dir, verbose
         )
@@ -275,37 +354,66 @@ def process_audio_fixed_duration(
     # Guard: ensure segments were created and valid
     if not seg_paths or any((not os.path.exists(p) or os.path.getsize(p) < 1024) for p in seg_paths):
         raise RuntimeError("Segmenting failed: missing or tiny segment files")
+    print(f"[SPLIT] ready {len(seg_paths)} segs {(time.time()-split_t0):.1f}s")
 
-    if verbose:
-        print("[2] Transcribe", flush=True)
-    minimal_outputs = _transcribe_segments(
-        seg_paths, source_language, transcription_models, work_output_dir, verbose
-    )
+    minimal_outputs: List[str]
+    if start_step.lower() in ("translate", "assemble", "validate"):
+        # Resume from saved raw transcripts
+        print("[TRANSCRIBE] resume", flush=True)
+        minimal_outputs = []
+        for i in range(len(seg_paths)):
+            raw_path = os.path.join(work_output_dir, "raw", f"segment_{i}_raw.txt")
+            try:
+                with open(raw_path, "r", encoding="utf-8") as f:
+                    minimal_outputs.append(f.read())
+            except Exception:
+                minimal_outputs.append("")
+    else:
+        print("[TRANSCRIBE] start", flush=True)
+        tr_t0 = time.time()
+        minimal_outputs = _transcribe_segments(
+            seg_paths, source_language, transcription_models, work_output_dir, verbose,
+            transcribe_timeout_s, translate_retry_wait_s,
+        )
+        print(f"[TRANSCRIBE] done {(time.time()-tr_t0):.1f}s")
 
     # Guard: ensure we have any non-empty transcription before translating
     if not any(s.strip() for s in minimal_outputs):
         raise RuntimeError("Transcription failed: all segments empty")
 
-    if verbose:
-        print("[3] Translate", flush=True)
-    translated_outputs = _translate_segments(
-        minimal_outputs, source_language, target_language, translation_models, work_output_dir, verbose
-    )
+    if start_step.lower() in ("assemble", "validate"):
+        print("[TRANSLATE] resume", flush=True)
+        translated_outputs: List[str] = []
+        for i in range(len(minimal_outputs)):
+            t_path = os.path.join(work_output_dir, "translated", f"segment_{i}_translated.txt")
+            try:
+                with open(t_path, "r", encoding="utf-8") as f:
+                    translated_outputs.append(f.read())
+            except Exception:
+                translated_outputs.append("")
+    else:
+        print("[TRANSLATE] start", flush=True)
+        tl_t0 = time.time()
+        translated_outputs = _translate_segments(
+            minimal_outputs, source_language, target_language, translation_models, work_output_dir, verbose,
+            translate_timeout_s, translate_max_retries, translate_retry_wait_s,
+        )
+        print(f"[TRANSLATE] done {(time.time()-tl_t0):.1f}s")
 
     if not any(t.strip() for t in translated_outputs):
         raise RuntimeError("Translation failed: all segments empty")
 
-    if verbose:
-        print("[4] Assemble", flush=True)
-    srt_text = assemble_srt_from_minimal_segments(
-        translated_outputs, offsets_ms
-    )
-
     out_path = os.path.join(work_output_dir, base + ".srt")
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write(srt_text)
-    if verbose:
-        print(f"Wrote {out_path}", flush=True)
+    if start_step.lower() == "validate" and os.path.exists(out_path):
+        print("[ASSEMBLE] skip (existing SRT)", flush=True)
+    else:
+        print("[ASSEMBLE] start", flush=True)
+        srt_text = assemble_srt_from_minimal_segments(
+            translated_outputs, offsets_ms
+        )
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(srt_text)
+        print(f"[ASSEMBLE] wrote {out_path}")
 
     # Auto-validate and overwrite with fixed version
     try:
@@ -314,24 +422,19 @@ def process_audio_fixed_duration(
         if os.path.exists(tmp_fixed):
             try:
                 os.replace(tmp_fixed, out_path)
-                if verbose:
-                    bad_counts = {k: len(v) for k, v in _issues.items()}
-                    print(f"Validated and fixed SRT in place. Issues summary: {bad_counts}")
+                bad_counts = {k: len(v) for k, v in _issues.items()}
+                print(f"[VALIDATE] fixed {bad_counts}")
             except Exception as e:
-                if verbose:
-                    print(f"Warning: failed to replace SRT with fixed version: {e}")
+                print(f"[VALIDATE] replace-error: {e}")
     except Exception as e:
-        if verbose:
-            print(f"Warning: SRT validation step failed: {e}")
+        print(f"[VALIDATE] error: {e}")
 
-    if cleanup and verbose:
-        print("[5] Cleanup", flush=True)
     if cleanup:
         try:
             shutil.rmtree(tmp_dir)
+            print("[CLEANUP] done")
         except Exception as e:
-            print(f"Error cleaning up tmp_dir: {e}")
+            print(f"[CLEANUP] error: {e}")
 
-    if verbose:
-        print(f"Done in {time.time() - t0:.1f}s", flush=True)
+    print(f"[DONE] {time.time() - t0:.1f}s")
     return out_path

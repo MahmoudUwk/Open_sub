@@ -10,27 +10,40 @@ This project extracts audio from videos, transcribes and translates it using Gem
 - Set GEMINI_API_KEY in environment (no .env files).
 
 ## Configuration (config.json)
-- `path_to_vid`: Either a YouTube URL (http/https) or a local video file path (e.g., .mp4). If URL, the pipeline downloads it first; if local path, it uses it directly.
-- `source_language`: Audio language (e.g., "Arabic").
-- `target_language`: Translation language (e.g., "Latin American Spanish").
-- `output_dir`: SRT output dir (e.g., "output_srt").
-- `tmp_dir`: Temp segments dir (e.g., "tmp_segments").
-- `cleanup`: Delete tmp files after (true/false).
-- `min_segment_minutes`: Segment length in minutes (e.g., 5).
-- `transcription_models`: ["gemini-2.5-pro"] (default primary model per segment).
-- `transcription_fallback_models`: list of fallback models tried in order if the primary attempt is empty or errors (e.g., rate limit). Default: `["gemini-2.5-flash"]`.
-- `translation_models`: ["gemini-2.5-pro"] (or your preferred primary model per segment).
-- `translation_fallback_models`: list of fallback models for translation, tried in order. Default: `["gemini-2.5-flash"]`.
+- `path_to_vid`: YouTube URL (http/https) or local video path.
+- `source_language`: e.g., "Arabic".
+- `target_language`: e.g., "Latin American Spanish".
+- `output_dir`: e.g., "output_srt".
+- `tmp_dir`: e.g., "tmp_segments".
+- `cleanup`: true/false.
+- `min_segment_minutes`: e.g., 5 or 10.
+- `transcription_models`: e.g., ["gemini-2.5-pro"] or ["gemini-2.5-flash"].
+- `translation_models`: e.g., ["gemini-2.5-pro"] or ["gemini-2.5-flash"].
+- `start_step` (number): where to start/resume.
+  - 0 = download
+  - 1 = split
+  - 2 = transcribe
+  - 3 = translate
+  - 4 = assemble
+  - 5 = validate
 
 ## How It Works
 1. **Config Load**: `main.py` loads `config.json`.
-2. **Input handling**: If `path_to_vid` is a URL, it downloads the video to `downloaded_videos/` via `src/download_youtube.py`. If it's a local path, it uses it directly.
-3. **Audio Extraction** (`src/get_audio.py`): Stream-copies audio from the video (no re-encode) into the run folder under `output_dir/<video_base>/extracted_audio/`.
-4. **Splitting** (`src/audio_utils.py`): Splits audio into segments inside `output_dir/<video_base>/<tmp_dir>/`.
-5. **Transcription** (`src/upload_transcribe_translate_audio.py`): For each segment, tries the primary model once; on empty/error, iterates `transcription_fallback_models` with up to 3 retries each. Saves raw outputs in `output_dir/<video_base>/raw/`.
-6. **Translation** (`src/process_long_audio.py`): For each segment, tries the primary translation model once; on empty/error, iterates `translation_fallback_models` with up to 3 retries each. Saves translated text in `output_dir/<video_base>/translated/`.
-7. **Assembly** (`src/minimal_format.py`): Produces final SRT at `output_dir/<video_base>/<video_base>.srt`.
-8. **Cleanup**: Optional deletion of only the run-specific temp folder inside `output_dir/<video_base>/`.
+2. **Download/Local**: If URL, downloads; if local, uses directly.
+3. **Audio Extraction**: Writes `extracted_audio/<base>.m4a` under `output_dir/<base>/`.
+4. **Split**: Creates segments in `<tmp_dir>/` and `offsets.json` in the run root.
+5. **Transcribe**: Saves `raw/segment_{i}_raw.txt`.
+6. **Translate**: Saves `translated/segment_{i}_translated.txt`.
+7. **Assemble**: Writes `<base>.srt`.
+8. **Validate**: Fixes common SRT issues and overwrites if improved.
+
+### Start/Resume behavior
+- Set `start_step` to start EXACTLY at that step:
+  - `2 (transcribe)`: uses existing segments; transcribes now.
+  - `3 (translate)`: loads `raw/*.txt`; translates now.
+  - `4 (assemble)`: loads `translated/*.txt`; assembles now.
+  - `5 (validate)`: validates an existing SRT; if missing, it assembles from existing translations.
+- When `start_step >= 2`, the app auto-detects the latest run folder in `output_dir/` (by most recent `offsets.json`). If required assets are missing, it raises a clear error.
 
 Validations ensure steps succeed before proceeding.
 

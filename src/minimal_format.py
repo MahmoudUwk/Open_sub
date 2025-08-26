@@ -37,6 +37,9 @@ def parse_time_value_to_ms(value: Any) -> Optional[int]:
                     out_chars.append(ch)
             return ''.join(out_chars)
         v = _norm_digits(v)
+        # Handle formats like '1m2s' -> '1:2'
+        v = v.replace('m', ':').replace('s', '')
+
         # Try strict HH:MM:SS first
         m = TIME_RE_HHMMSS_MS.match(v)
         if m:
@@ -197,13 +200,37 @@ def assemble_srt_from_minimal_segments(
     """Assemble a final SRT file from multiple timed-line segment outputs by appending and shifting."""
     entries = []
     for idx, text in enumerate(segment_outputs):
-        items = parse_minimal_lines(text)
+        # Strip conversational intros or other non-subtitle text
+        lines = text.strip().splitlines()
+        first_subtitle_line_idx = -1
+        for i, line in enumerate(lines):
+            if "-->" in line or ("[" in line and "]" in line and "-" in line):
+                first_subtitle_line_idx = i
+                break
+        
+        cleaned_text = text
+        if first_subtitle_line_idx != -1:
+            cleaned_text = "\n".join(lines[first_subtitle_line_idx:])
+
+        items = parse_minimal_lines(cleaned_text)
         if not items:
             # Fallback: try parsing as standard SRT blocks (models sometimes drift format)
-            items = parse_srt_blocks(text)
+            items = parse_srt_blocks(cleaned_text)
         if not items:
             continue
-        offset = offsets_ms[idx]  # Directly use the provided offset
+
+        offset = offsets_ms[idx]
+
+        # Detect and fix absolute timestamps by rebasing them
+        if items:
+            first_start_ms = items[0]["start_ms"]
+            # Heuristic: if first timestamp is near the segment's global offset,
+            # assume all timestamps in the segment are absolute.
+            if abs(first_start_ms - offset) < 30000:  # 30-second tolerance
+                for item in items:
+                    item["start_ms"] -= offset
+                    item["end_ms"] -= offset
+        
         # Infer this segment's length using the next offset when available
         seg_len = None
         if idx + 1 < len(offsets_ms):
