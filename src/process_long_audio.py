@@ -208,9 +208,12 @@ def _translate_segments(
 
         model = translation_models[i % len(translation_models)]
         prompt = (
-            f"You are a professional subtitle translator.\n"
-            f"Translate the following text from {source_language} to {target_language}.\n"
-            f"The input is a list of timed subtitles. You MUST preserve the timestamps exactly.\n"
+            f"Translate from {source_language} to {target_language}.\n"
+            f"Output ONLY the lines with the SAME structure.\n"
+            f"Format per line: [start-end]: text\n"
+            f"- start,end are TOTAL SECONDS with milliseconds (e.g., [367.123-375.163]).\n"
+            f"- Preserve timestamps EXACTLY (numbers, brackets [], single hyphen -).\n"
+            f"- Do NOT change, add, remove, or reorder timestamps. Translate text only.\n"
             f"Input:\n{out}\n\n"
             f"Output:\n"
         )

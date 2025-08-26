@@ -14,11 +14,11 @@ RATE_LIMIT_ERRORS = (
 )
 
 TRANSCRIPTION_PROMPT_TEMPLATE = (
-    """You are given an audio segment from a movie.
-Task: Transcribe all speech accurately from the audio in {source_language}.
-Output format: Plain text lines, each: [HH:MM:SS,ms - HH:MM:SS,ms]: transcribed text
-- Use a comma before milliseconds, e.g., [00:01:02,345 - 00:01:05,678]: Text
-- Break into many short subtitles: each 5-10 seconds long, with at most 1-2 sentences in text.
+    """Transcribe speech in {source_language}.
+Output ONLY lines in this EXACT format: "[start-end]: text"
+Rules:
+- start,end are in format total_seconds.milliseconds. Example: 75.123 would be 75 seconds and 123 milliseconds.
+- Group words into readable phrases suitible for subtitles (max 1–2 sentences per line).
 """
 )
 

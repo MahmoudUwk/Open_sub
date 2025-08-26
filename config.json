@@ -6,10 +6,10 @@
   "tmp_dir": "tmp_segments",
   "cleanup": true,
   "transcription_models": ["gemini-2.5-flash"],
-  "min_segment_minutes": 5,
+  "min_segment_minutes": 10,
   "translation_models": ["gemini-2.5-flash"],
-  "transcribe_timeout_s": 100,
-  "translate_timeout_s": 100,
+  "transcribe_timeout_s": 120,
+  "translate_timeout_s": 120,
   "translate_max_retries": 3,
   "translate_retry_wait_s": 20,
   "start_step": 0
