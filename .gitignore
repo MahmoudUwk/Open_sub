@@ -35,3 +35,22 @@ TestResults.xml
 *.m4x
 *.m4y
 *output_srt/*
+# Partial download files
+*.part
+*.tmp
+# Large video files
+*.avi
+*.mov
+*.wmv
+*.flv
+*.webm
+*.mkv
+# Large audio files
+*.wav
+*.flac
+*.aac
+*.ogg
+# Temporary processing directories
+tmp_segments/
+extracted_audio/
+*downloads/
