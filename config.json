@@ -1,5 +1,5 @@
 {
-  "path_to_vid": "output_srt/PJOI0SDvS6g/source_video/PJOI0SDvS6g.mp4",
+  "path_to_vid": "https://www.youtube.com/watch?v=2Lt5rZ9KcOo",
   "source_language": "Arabic",
   "target_language": "Latin American Spanish",
   "output_dir": "output_srt",
@@ -13,5 +13,5 @@
   "translate_max_retries": 3,
   "transcribe_retry_wait_s": 20,
   "translate_retry_wait_s": 20,
-  "start_step": 3
+  "start_step": 0
 }

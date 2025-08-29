@@ -55,7 +55,7 @@ def find_downloader() -> List[str]:
 
 
 def get_video_id(downloader: List[str], url: str) -> str:
-    cp = run(downloader + ["--no-playlist", "--get-id", url])
+    cp = run(downloader + ["--cookies-from-browser", "firefox", "--no-playlist", "--get-id", url])
     vid = cp.stdout.strip().splitlines()[-1].strip()
     if not vid:
         raise RuntimeError("Failed to resolve video ID from URL")
@@ -75,6 +75,7 @@ def _download_with_python_modules(url: str, out_dir: str) -> Optional[str]:
             'merge_output_format': 'mp4',
             'format': 'bestvideo+bestaudio/best',
             'quiet': False,
+            'cookiesfrombrowser': ['firefox'],
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -130,6 +131,7 @@ def download_youtube(url: str, out_dir: str = DOWNLOAD_DIR) -> str:
 
     # Prefer bestvideo+bestaudio merged to mp4; fallback to best
     cmd = downloader + [
+        "--cookies-from-browser", "firefox",
         "--no-playlist",
         "-f", "bestvideo+bestaudio/best",
         "--merge-output-format", "mp4",
