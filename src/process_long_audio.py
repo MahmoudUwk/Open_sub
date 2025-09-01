@@ -101,10 +101,10 @@ def _transcribe_segments(
                     time.sleep(transcribe_retry_wait_s)
                     continue  # Retry same segment indefinitely on timeout
                 if err:
-                    # Print concise error with duration, then continue to next segment
-                    print(f"[TR] seg {i} error {duration:.1f}s: {err}")
-                    minimal_outputs.append("")
-                    break
+                    print(f"[TR] seg {i} error {duration:.1f}s: {err}", flush=True)
+                    print(f"[TR] wait {transcribe_retry_wait_s}s before retry...", flush=True)
+                    time.sleep(transcribe_retry_wait_s)
+                    continue
                 if not outcome.strip():
                     # Empty but not an exception: wait and retry indefinitely
                     print(f"[TR] seg {i} empty {duration:.1f}s", flush=True)
@@ -160,7 +160,18 @@ def _translate_segments(
     def _call_once(m: str, text: str) -> tuple[str, str | None]:
         try:
             client = genai.Client()
-            response = client.models.generate_content(model=m, contents=text)
+            response = client.models.generate_content(
+                model=m,
+                contents=text,
+                config=genai.types.GenerateContentConfig(
+                    safety_settings=[
+                        genai.types.SafetySetting(
+                            category=genai.types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                            threshold=genai.types.HarmBlockThreshold.BLOCK_NONE
+                        )
+                    ]
+                )
+            )
             t = (getattr(response, "text", None) or "").strip()
             return t, None
         except Exception as e:
@@ -203,13 +214,15 @@ def _translate_segments(
                         t = ""
                         err = reason or "validation_failed"
                 if not t:
-                    # Consider empty as an error-like outcome for statistics
+                    # Empty response: retry indefinitely (do not count against max_retries)
                     errors += 1
-                    non_timeout_attempts += 1
                     last_err = (err or "empty")
                     if verbose:
                         msg = err or "empty"
-                        print(f"[TL] {m} attempt {attempt}/{max_retries}: {msg} {a_dur:.1f}s")
+                        print(f"[TL] {m} attempt {attempt}: {msg} {a_dur:.1f}s (retrying indefinitely on empty)")
+                    print(f"[TL] wait {translate_retry_wait_s}s before retry...", flush=True)
+                    time.sleep(translate_retry_wait_s)
+                    continue
             else:
                 # Exception path
                 errors += 1
@@ -221,12 +234,9 @@ def _translate_segments(
             if t:
                 return t, {"attempts": attempts, "timeouts": timeouts, "errors": errors, "last_error": last_err}
 
-            # Stop if exceeded non-timeout retries; otherwise wait and retry
+            # Stop only if exceeded non-timeout retries (actual errors, not empty responses)
             if non_timeout_attempts >= max_retries:
                 return "", {"attempts": attempts, "timeouts": timeouts, "errors": errors, "last_error": last_err}
-            if verbose:
-                print(f"[TL] wait {translate_retry_wait_s}s before retry...")
-            time.sleep(translate_retry_wait_s)
 
     for i, out in enumerate(minimal_outputs):
         if not out.strip():

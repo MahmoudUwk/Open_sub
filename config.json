@@ -11,7 +11,7 @@
   "transcribe_timeout_s": 150,
   "translate_timeout_s": 120,
   "translate_max_retries": 3,
-  "transcribe_retry_wait_s": 20,
-  "translate_retry_wait_s": 20,
-  "start_step": 0
+  "transcribe_retry_wait_s": 0,
+  "translate_retry_wait_s": 0,
+  "start_step": 3
 }

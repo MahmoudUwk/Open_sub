@@ -3,10 +3,10 @@
 import os
 import json
 import time
-from dotenv import load_dotenv
+
 from google import genai
 from google.genai import types
-
+from dotenv import load_dotenv
 load_dotenv()
 
 RATE_LIMIT_ERRORS = (
@@ -42,6 +42,14 @@ def transcribe_minimal(
             response = client.models.generate_content(
                 model=use_model,
                 contents=[prompt, audio_part],
+                config=genai.types.GenerateContentConfig(
+                    safety_settings=[
+                        genai.types.SafetySetting(
+                            category=genai.types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                            threshold=genai.types.HarmBlockThreshold.BLOCK_NONE
+                        )
+                    ]
+                )
             )
             text = (getattr(response, "text", None) or "").strip()
             return text, None
