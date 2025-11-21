@@ -1,26 +1,32 @@
 """Handles interaction with the Gemini API for transcription."""
 
-import os
-import json
 import time
 
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
+
 load_dotenv()
 
 RATE_LIMIT_ERRORS = (
-    "429", "rate limit", "exceeded", "quota", "Resource has been exhausted"
+    "429",
+    "rate limit",
+    "exceeded",
+    "quota",
+    "Resource has been exhausted",
 )
 
-TRANSCRIPTION_PROMPT_TEMPLATE = (
-    """Transcribe speech in {source_language}.
-Output ONLY lines in this EXACT format: "[start-end]: text"
+TRANSCRIPTION_PROMPT_TEMPLATE = """Transcribe speech in {source_language}.
+Output ONLY a JSON list of objects in this EXACT format:
+[
+  {{"start": "XmYsZms", "end": "XmYsZms", "text": "..."}},
+  ...
+]
 Rules:
 - start,end are in format XmYsZms. Example 9m32s839ms is 9 minutes, 32 seconds, and 839 milliseconds.
-- Group words into readable phrases suitible for subtitles (max 1–2 sentences per line).
+- Group words into readable phrases suitable for subtitles (max 1–2 sentences per line).
 """
-)
+
 
 def transcribe_minimal(
     audio_bytes: bytes,
@@ -46,10 +52,10 @@ def transcribe_minimal(
                     safety_settings=[
                         genai.types.SafetySetting(
                             category=genai.types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-                            threshold=genai.types.HarmBlockThreshold.BLOCK_NONE
+                            threshold=genai.types.HarmBlockThreshold.BLOCK_NONE,
                         )
                     ]
-                )
+                ),
             )
             text = (getattr(response, "text", None) or "").strip()
             return text, None

@@ -1,13 +1,17 @@
 {
-  "path_to_vid": "https://www.youtube.com/watch?v=2Lt5rZ9KcOo",
+  "path_to_vid": "dummy_video.mp4",
   "source_language": "Arabic",
   "target_language": "Latin American Spanish",
   "output_dir": "output_srt",
   "tmp_dir": "tmp_segments",
   "cleanup": false,
-  "transcription_models": ["gemini-2.5-flash"],
-  "min_segment_minutes": 10,
-  "translation_models": ["gemini-2.5-flash"],
+  "transcription_models": [
+    "gemini-2.5-flash-preview-09-2025"
+  ],
+  "min_segment_minutes": 5,
+  "translation_models": [
+    "gemini-2.5-flash-preview-09-2025"
+  ],
   "transcribe_timeout_s": 150,
   "translate_timeout_s": 120,
   "translate_max_retries": 3,

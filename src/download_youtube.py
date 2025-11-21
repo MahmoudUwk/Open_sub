@@ -7,8 +7,10 @@ from typing import Optional, List
 
 DOWNLOAD_DIR = "downloaded_videos"
 
+
 def run(cmd: List[str]) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, check=True, text=True, capture_output=True)
+
 
 def find_downloader() -> List[str]:
     """Return the command list to invoke yt-dlp or youtube-dl.
@@ -16,15 +18,26 @@ def find_downloader() -> List[str]:
     If the binary has an Exec format error (common when a script is downloaded without a proper shebang),
     wrap it with python3.
     """
+
     def validate(cmd: List[str]) -> Optional[List[str]]:
         try:
-            subprocess.run(cmd + ["--version"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(
+                cmd + ["--version"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
             return cmd
         except OSError as e:
             # Exec format error -> try python wrapper
-            if getattr(e, 'errno', None) == 8 or 'Exec format error' in str(e):
+            if getattr(e, "errno", None) == 8 or "Exec format error" in str(e):
                 try:
-                    subprocess.run(["python3", cmd[0], "--version"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    subprocess.run(
+                        ["python3", cmd[0], "--version"],
+                        check=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
                     return ["python3", cmd[0]]
                 except Exception:
                     return None
@@ -51,11 +64,13 @@ def find_downloader() -> List[str]:
             v = validate([path])
             if v:
                 return v
-    raise RuntimeError("yt-dlp/youtube-dl not found or not executable. Ensure it's installed correctly.")
+    raise RuntimeError(
+        "yt-dlp/youtube-dl not found or not executable. Ensure it's installed correctly."
+    )
 
 
 def get_video_id(downloader: List[str], url: str) -> str:
-    cp = run(downloader + ["--cookies-from-browser", "firefox", "--no-playlist", "--get-id", url])
+    cp = run(downloader + ["--no-playlist", "--get-id", url])
     vid = cp.stdout.strip().splitlines()[-1].strip()
     if not vid:
         raise RuntimeError("Failed to resolve video ID from URL")
@@ -70,16 +85,15 @@ def _download_with_python_modules(url: str, out_dir: str) -> Optional[str]:
         import yt_dlp  # type: ignore
 
         ydl_opts = {
-            'outtmpl': os.path.join(out_dir, '%(id)s.%(ext)s'),
-            'noplaylist': True,
-            'merge_output_format': 'mp4',
-            'format': 'bestvideo+bestaudio/best',
-            'quiet': False,
-            'cookiesfrombrowser': ['firefox'],
+            "outtmpl": os.path.join(out_dir, "%(id)s.%(ext)s"),
+            "noplaylist": True,
+            "merge_output_format": "mp4",
+            "format": "bestvideo+bestaudio/best",
+            "quiet": False,
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            vid = info.get('id')
+            vid = info.get("id")
         # Check produced files
         for ext in ("mp4", "mkv", "webm"):
             candidate = os.path.join(out_dir, f"{vid}.{ext}")
@@ -93,15 +107,15 @@ def _download_with_python_modules(url: str, out_dir: str) -> Optional[str]:
         import youtube_dl  # type: ignore
 
         ydl_opts = {
-            'outtmpl': os.path.join(out_dir, '%(id)s.%(ext)s'),
-            'noplaylist': True,
-            'merge_output_format': 'mp4',
-            'format': 'bestvideo+bestaudio/best',
-            'quiet': False,
+            "outtmpl": os.path.join(out_dir, "%(id)s.%(ext)s"),
+            "noplaylist": True,
+            "merge_output_format": "mp4",
+            "format": "bestvideo+bestaudio/best",
+            "quiet": False,
         }
         with youtube_dl.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            vid = info.get('id')
+            vid = info.get("id")
         for ext in ("mp4", "mkv", "webm"):
             candidate = os.path.join(out_dir, f"{vid}.{ext}")
             if os.path.exists(candidate):
@@ -131,11 +145,13 @@ def download_youtube(url: str, out_dir: str = DOWNLOAD_DIR) -> str:
 
     # Prefer bestvideo+bestaudio merged to mp4; fallback to best
     cmd = downloader + [
-        "--cookies-from-browser", "firefox",
         "--no-playlist",
-        "-f", "bestvideo+bestaudio/best",
-        "--merge-output-format", "mp4",
-        "-o", out_tmpl,
+        "-f",
+        "bestvideo+bestaudio/best",
+        "--merge-output-format",
+        "mp4",
+        "-o",
+        out_tmpl,
         url,
     ]
     # Let it print progress to console for visibility
@@ -148,7 +164,7 @@ def download_youtube(url: str, out_dir: str = DOWNLOAD_DIR) -> str:
         candidate = os.path.join(out_dir, f"{vid}.{ext}")
         if os.path.exists(candidate):
             # If it's a partial file, consider download incomplete
-            if candidate.endswith('.part'):
+            if candidate.endswith(".part"):
                 raise RuntimeError("Download incomplete (.part file remains)")
             return candidate
 
@@ -173,6 +189,7 @@ def main(argv: list) -> int:
     except Exception as e:
         print(f"Error: {e}")
         return 1
+
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv))

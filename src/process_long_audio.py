@@ -3,8 +3,7 @@
 import os
 import json
 import time
-import multiprocessing as mp
-import datetime
+import concurrent.futures
 import shutil
 from typing import List, Optional
 
@@ -12,39 +11,17 @@ import google.genai as genai
 
 from .audio_utils import split_audio_by_duration
 from .upload_transcribe_translate_audio import transcribe_minimal, RATE_LIMIT_ERRORS
-from .minimal_format import assemble_srt_from_minimal_segments, clean_minimal_text, parse_minimal_lines, format_ms_xmys
+from .minimal_format import (
+    assemble_srt_from_json_segments,
+    clean_json_text,
+    parse_json_segments,
+    format_ms_xmys,
+)
 from .audio_utils import get_audio_duration_ms
 
 TIMEOUT_TRANSCRIBE_S = 120
 TIMEOUT_TRANSLATE_S = 90
 
-def _call_with_timeout(func, timeout_s: int, *args, **kwargs):
-    """Run func with a hard timeout using a child process.
-    Returns (result, err_str or None). On timeout, returns (None, 'timeout').
-    """
-    q = mp.Queue(maxsize=1)
-
-    def _runner(q):
-        try:
-            res = func(*args, **kwargs)
-            q.put((res, None))
-        except Exception as e:
-            q.put((None, str(e)))
-
-    p = mp.Process(target=_runner, args=(q,), daemon=True)
-    p.start()
-    p.join(timeout_s)
-    if p.is_alive():
-        try:
-            p.terminate()
-        except Exception:
-            pass
-        p.join(1)
-        return None, "timeout"
-    try:
-        return q.get_nowait()
-    except Exception:
-        return None, "unknown_error"
 
 def _guess_mime_type_from_extension(path: str) -> str:
     """Guess the MIME type of an audio file from its extension."""
@@ -61,6 +38,7 @@ def _guess_mime_type_from_extension(path: str) -> str:
         return "audio/ogg"
     return "application/octet-stream"
 
+
 def _call_model_for_segment(
     segment_path: str,
     source_language: str,
@@ -71,7 +49,10 @@ def _call_model_for_segment(
     """Read an audio segment and call the transcription model."""
     with open(segment_path, "rb") as f:
         audio_bytes = f.read()
-    return transcribe_minimal(audio_bytes, mime_type, source_language, model, verbose=verbose)
+    return transcribe_minimal(
+        audio_bytes, mime_type, source_language, model, verbose=verbose
+    )
+
 
 def _transcribe_segments(
     seg_paths: List[str],
@@ -84,34 +65,73 @@ def _transcribe_segments(
 ) -> List[str]:
     """Transcribe each audio segment sequentially."""
     minimal_outputs = []
+
+    # Use ThreadPoolExecutor for timeouts instead of multiprocessing
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
     for i, seg_path in enumerate(seg_paths):
         model = transcription_models[i % len(transcription_models)]
         try:
             while True:
                 start_time = time.time()
-                outcome, err = _call_with_timeout(
+                future = executor.submit(
                     _call_model_for_segment,
-                    transcribe_timeout_s,
-                    seg_path, source_language, model, _guess_mime_type_from_extension(seg_path), verbose
+                    seg_path,
+                    source_language,
+                    model,
+                    _guess_mime_type_from_extension(seg_path),
+                    verbose,
                 )
+
+                try:
+                    outcome = future.result(timeout=transcribe_timeout_s)
+                    err = None
+                except concurrent.futures.TimeoutError:
+                    outcome = None
+                    err = "timeout"
+                except Exception as e:
+                    outcome = None
+                    err = str(e)
+
                 duration = time.time() - start_time
                 if err == "timeout":
                     print(f"[TR] seg {i} timeout {transcribe_timeout_s}s", flush=True)
-                    print(f"[TR] wait {transcribe_retry_wait_s}s before retry...", flush=True)
+                    print(
+                        f"[TR] wait {transcribe_retry_wait_s}s before retry...",
+                        flush=True,
+                    )
                     time.sleep(transcribe_retry_wait_s)
                     continue  # Retry same segment indefinitely on timeout
                 if err:
                     print(f"[TR] seg {i} error {duration:.1f}s: {err}", flush=True)
-                    print(f"[TR] wait {transcribe_retry_wait_s}s before retry...", flush=True)
+                    print(
+                        f"[TR] wait {transcribe_retry_wait_s}s before retry...",
+                        flush=True,
+                    )
                     time.sleep(transcribe_retry_wait_s)
                     continue
-                if not outcome.strip():
+                if not outcome or not outcome.strip():
                     # Empty but not an exception: wait and retry indefinitely
                     print(f"[TR] seg {i} empty {duration:.1f}s", flush=True)
-                    print(f"[TR] wait {transcribe_retry_wait_s}s before retry...", flush=True)
+                    print(
+                        f"[TR] wait {transcribe_retry_wait_s}s before retry...",
+                        flush=True,
+                    )
                     time.sleep(transcribe_retry_wait_s)
                     continue
-                cleaned = clean_minimal_text(str(outcome))
+
+                # Validate JSON
+                try:
+                    cleaned = clean_json_text(str(outcome))
+                except Exception as e:
+                    print(f"[TR] seg {i} invalid json {duration:.1f}s: {e}", flush=True)
+                    print(
+                        f"[TR] wait {transcribe_retry_wait_s}s before retry...",
+                        flush=True,
+                    )
+                    time.sleep(transcribe_retry_wait_s)
+                    continue
+
                 minimal_outputs.append(cleaned)
                 # Always show a single concise success line for non-empty output
                 print(f"[TR] seg {i} ok {duration:.1f}s")
@@ -123,7 +143,10 @@ def _transcribe_segments(
             # Unexpected error in wrapper
             print(f"[TR] seg {i} error: {str(e)}")
             minimal_outputs.append("")
+
+    executor.shutdown(wait=False)
     return minimal_outputs
+
 
 def _translate_segments(
     minimal_outputs: List[str],
@@ -138,24 +161,7 @@ def _translate_segments(
 ) -> List[str]:
     """Translate each transcribed segment with configurable fallbacks."""
     translated_outputs = []
-
-    # Helper: extract simple bullet lines ("- some text"). If none, fallback to non-empty lines
-    def _extract_bullets(text: str) -> List[str]:
-        lines: List[str] = []
-        if not text:
-            return lines
-        for raw in text.splitlines():
-            l = raw.strip()
-            if not l:
-                continue
-            if l.startswith("- "):
-                lines.append(l[2:].strip())
-        if not lines:
-            for raw in text.splitlines():
-                l = raw.strip()
-                if l:
-                    lines.append(l)
-        return lines
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
     def _call_once(m: str, text: str) -> tuple[str, str | None]:
         try:
@@ -167,10 +173,10 @@ def _translate_segments(
                     safety_settings=[
                         genai.types.SafetySetting(
                             category=genai.types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-                            threshold=genai.types.HarmBlockThreshold.BLOCK_NONE
+                            threshold=genai.types.HarmBlockThreshold.BLOCK_NONE,
                         )
                     ]
-                )
+                ),
             )
             t = (getattr(response, "text", None) or "").strip()
             return t, None
@@ -187,15 +193,31 @@ def _translate_segments(
             attempt = attempts + 1
             attempts += 1
             a_t0 = time.time()
-            res, to_err = _call_with_timeout(_call_once, translate_timeout_s, m, text)
+
+            future = executor.submit(_call_once, m, text)
+            try:
+                res = future.result(timeout=translate_timeout_s)
+                to_err = None
+            except concurrent.futures.TimeoutError:
+                res = None
+                to_err = "timeout"
+            except Exception as e:
+                res = None
+                to_err = str(e)
+
             a_dur = time.time() - a_t0
             t = ""
             err = to_err
             if to_err == "timeout":
                 timeouts += 1
-                print(f"[TL] {m} attempt {attempt}/{max_retries}: timeout {a_dur:.1f}s", flush=True)
+                print(
+                    f"[TL] {m} attempt {attempt}/{max_retries}: timeout {a_dur:.1f}s",
+                    flush=True,
+                )
                 # Always retry on timeout (do not count against max_retries)
-                print(f"[TL] wait {translate_retry_wait_s}s before retry...", flush=True)
+                print(
+                    f"[TL] wait {translate_retry_wait_s}s before retry...", flush=True
+                )
                 time.sleep(translate_retry_wait_s)
                 continue
             elif to_err is None:
@@ -216,11 +238,16 @@ def _translate_segments(
                 if not t:
                     # Empty response: retry indefinitely (do not count against max_retries)
                     errors += 1
-                    last_err = (err or "empty")
+                    last_err = err or "empty"
                     if verbose:
                         msg = err or "empty"
-                        print(f"[TL] {m} attempt {attempt}: {msg} {a_dur:.1f}s (retrying indefinitely on empty)")
-                    print(f"[TL] wait {translate_retry_wait_s}s before retry...", flush=True)
+                        print(
+                            f"[TL] {m} attempt {attempt}: {msg} {a_dur:.1f}s (retrying indefinitely on empty)"
+                        )
+                    print(
+                        f"[TL] wait {translate_retry_wait_s}s before retry...",
+                        flush=True,
+                    )
                     time.sleep(translate_retry_wait_s)
                     continue
             else:
@@ -229,14 +256,26 @@ def _translate_segments(
                 non_timeout_attempts += 1
                 last_err = err
                 if verbose:
-                    print(f"[TL] {m} attempt {attempt}/{max_retries}: {err} {a_dur:.1f}s")
+                    print(
+                        f"[TL] {m} attempt {attempt}/{max_retries}: {err} {a_dur:.1f}s"
+                    )
 
             if t:
-                return t, {"attempts": attempts, "timeouts": timeouts, "errors": errors, "last_error": last_err}
+                return t, {
+                    "attempts": attempts,
+                    "timeouts": timeouts,
+                    "errors": errors,
+                    "last_error": last_err,
+                }
 
             # Stop only if exceeded non-timeout retries (actual errors, not empty responses)
             if non_timeout_attempts >= max_retries:
-                return "", {"attempts": attempts, "timeouts": timeouts, "errors": errors, "last_error": last_err}
+                return "", {
+                    "attempts": attempts,
+                    "timeouts": timeouts,
+                    "errors": errors,
+                    "last_error": last_err,
+                }
 
     for i, out in enumerate(minimal_outputs):
         if not out.strip():
@@ -245,62 +284,104 @@ def _translate_segments(
             continue
 
         model = translation_models[i % len(translation_models)]
-        # Prepare bullet-only input (no timestamps). Preserve line order and count
-        items = parse_minimal_lines(clean_minimal_text(out))
+
+        # Parse JSON to extract text for translation
+        items = parse_json_segments(clean_json_text(out))
         orig_texts = [it["text"] for it in items]
         time_pairs = [(int(it["start_ms"]), int(it["end_ms"])) for it in items]
-        bullet_input = "\n".join(f"- {t}" for t in orig_texts)
+
+        # Prepare JSON input for translation
+        # We send a list of strings to translate
+        json_input = json.dumps(orig_texts, ensure_ascii=False, indent=2)
+
         prompt = (
             f"Translate from {source_language} to {target_language}.\n"
-            f"You will receive N lines starting with '- ' (hyphens).\n"
-            f"Output ONLY N lines, in the SAME order, each starting with '- ' followed by the translated text.\n"
-            f"Do NOT add timestamps, numbering, brackets, or extra commentary.\n"
-            f"Input lines:\n{bullet_input}\n\n"
-            f"Output lines:\n"
+            f"You will receive a JSON list of strings.\n"
+            f"Output ONLY a JSON list of translated strings, in the SAME order.\n"
+            f"Input:\n{json_input}\n\n"
+            f"Output:\n"
         )
 
         # Call primary model with fixed-interval retries (no fallbacks)
         t0 = time.time()
-        trans_text, stats = _call_with_retries(model, prompt, max_retries=translate_max_retries, validator=None)
+
+        def json_validator(text):
+            try:
+                data = json.loads(text)
+                if not isinstance(data, list):
+                    return False, "not a list"
+                if len(data) != len(orig_texts):
+                    return (
+                        False,
+                        f"count mismatch exp={len(orig_texts)} got={len(data)}",
+                    )
+                return True, None
+            except json.JSONDecodeError:
+                return False, "invalid json"
+
+        trans_text, stats = _call_with_retries(
+            model, prompt, max_retries=translate_max_retries, validator=json_validator
+        )
         dur = time.time() - t0
+
         if not trans_text.strip():
             last_err = stats.get("last_error") or ""
             err_low = last_err.lower() if isinstance(last_err, str) else ""
-            rate_limited = any(k.lower() in err_low for k in RATE_LIMIT_ERRORS) if last_err else False
+            rate_limited = (
+                any(k.lower() in err_low for k in RATE_LIMIT_ERRORS)
+                if last_err
+                else False
+            )
             tag = "rate_limit" if rate_limited else "empty"
-            # Show concise summary with counts and last error snippet
-            snippet = (last_err[:120] + "...") if isinstance(last_err, str) and len(last_err) > 120 else (last_err or "")
+            snippet = (
+                (last_err[:120] + "...")
+                if isinstance(last_err, str) and len(last_err) > 120
+                else (last_err or "")
+            )
             print(
                 f"[TL] seg {i} {tag} {dur:.1f}s attempts={stats.get('attempts', 0)} "
                 f"timeouts={stats.get('timeouts', 0)} errors={stats.get('errors', 0)} last_err={snippet!r}"
             )
+            translated_outputs.append("")
+            continue
         else:
             print(f"[TL] seg {i} ok {dur:.1f}s attempts={stats.get('attempts', 0)}")
-        # Reinsert original timestamps to produce minimal lines again
-        translated_lines = _extract_bullets(trans_text)
-        if len(translated_lines) != len(orig_texts) and verbose:
-            print(
-                f"[TL] seg {i} line_count_mismatch exp={len(orig_texts)} got={len(translated_lines)}"
+
+        # Reconstruct JSON segments with original timestamps
+        try:
+            translated_lines = json.loads(trans_text)
+            # Align counts (should be handled by validator, but double check)
+            if len(translated_lines) < len(orig_texts):
+                translated_lines += orig_texts[len(translated_lines) :]
+            else:
+                translated_lines = translated_lines[: len(orig_texts)]
+
+            reconstructed = []
+            for (s, e), t in zip(time_pairs, translated_lines):
+                if str(t).strip():
+                    reconstructed.append(
+                        {
+                            "start": format_ms_xmys(s),
+                            "end": format_ms_xmys(e),
+                            "text": t.strip(),
+                        }
+                    )
+
+            cleaned_t = json.dumps(reconstructed, ensure_ascii=False, indent=2)
+            translated_outputs.append(cleaned_t)
+            translated_path = os.path.join(
+                output_dir, "translated", f"segment_{i}_translated.txt"
             )
-        # Align counts: truncate or pad with original text
-        if len(translated_lines) < len(orig_texts):
-            translated_lines += orig_texts[len(translated_lines):]
-        else:
-            translated_lines = translated_lines[:len(orig_texts)]
+            with open(translated_path, "w", encoding="utf-8") as f:
+                f.write(cleaned_t)
 
-        minimal_lines = [
-            f"[{format_ms_xmys(s)}-{format_ms_xmys(e)}]: {t.strip()}"
-            for (s, e), t in zip(time_pairs, translated_lines)
-            if str(t).strip()
-        ]
-        cleaned_t = clean_minimal_text("\n".join(minimal_lines))
-        translated_outputs.append(cleaned_t)
-        translated_path = os.path.join(output_dir, "translated", f"segment_{i}_translated.txt")
-        with open(translated_path, "w", encoding="utf-8") as f:
-            f.write(cleaned_t)
-        # keep file-system noise out of console
+        except Exception as e:
+            print(f"[TL] seg {i} reconstruction error: {e}")
+            translated_outputs.append("")
 
+    executor.shutdown(wait=False)
     return translated_outputs
+
 
 def process_audio_fixed_duration(
     input_audio: str,
@@ -386,13 +467,18 @@ def process_audio_fixed_duration(
         # Persist offsets for later reuse
         try:
             with open(offsets_json_path, "w", encoding="utf-8") as f:
-                json.dump({
-                    "base": base,
-                    "total_ms": total_ms,
-                    "segment_paths": seg_paths,
-                    "offsets_ms": offsets_ms,
-                    "durations_ms": seg_durations_ms,
-                }, f, ensure_ascii=False, indent=2)
+                json.dump(
+                    {
+                        "base": base,
+                        "total_ms": total_ms,
+                        "segment_paths": seg_paths,
+                        "offsets_ms": offsets_ms,
+                        "durations_ms": seg_durations_ms,
+                    },
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                )
         except Exception as e:
             if verbose:
                 print(f"Warning: failed to write offsets file: {e}")
@@ -405,20 +491,27 @@ def process_audio_fixed_duration(
         # Persist offsets for later reuse
         try:
             with open(offsets_json_path, "w", encoding="utf-8") as f:
-                json.dump({
-                    "base": base,
-                    "total_ms": total_ms,
-                    "segment_paths": seg_paths,
-                    "offsets_ms": offsets_ms,
-                    "durations_ms": seg_durations_ms,
-                }, f, ensure_ascii=False, indent=2)
+                json.dump(
+                    {
+                        "base": base,
+                        "total_ms": total_ms,
+                        "segment_paths": seg_paths,
+                        "offsets_ms": offsets_ms,
+                        "durations_ms": seg_durations_ms,
+                    },
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                )
         except Exception as e:
             if verbose:
                 print(f"Warning: failed to write offsets file: {e}")
     # Guard: ensure segments were created and valid
-    if not seg_paths or any((not os.path.exists(p) or os.path.getsize(p) < 1024) for p in seg_paths):
+    if not seg_paths or any(
+        (not os.path.exists(p) or os.path.getsize(p) < 1024) for p in seg_paths
+    ):
         raise RuntimeError("Segmenting failed: missing or tiny segment files")
-    print(f"[SPLIT] ready {len(seg_paths)} segs {(time.time()-split_t0):.1f}s")
+    print(f"[SPLIT] ready {len(seg_paths)} segs {(time.time() - split_t0):.1f}s")
 
     minimal_outputs: List[str]
     if start_step.lower() in ("translate", "assemble"):
@@ -429,17 +522,22 @@ def process_audio_fixed_duration(
             raw_path = os.path.join(work_output_dir, "raw", f"segment_{i}_raw.txt")
             try:
                 with open(raw_path, "r", encoding="utf-8") as f:
-                    minimal_outputs.append(clean_minimal_text(f.read()))
+                    minimal_outputs.append(clean_json_text(f.read()))
             except Exception:
                 minimal_outputs.append("")
     else:
         print("[TRANSCRIBE] start", flush=True)
         tr_t0 = time.time()
         minimal_outputs = _transcribe_segments(
-            seg_paths, source_language, transcription_models, work_output_dir, verbose,
-            transcribe_timeout_s, transcribe_retry_wait_s,
+            seg_paths,
+            source_language,
+            transcription_models,
+            work_output_dir,
+            verbose,
+            transcribe_timeout_s,
+            transcribe_retry_wait_s,
         )
-        print(f"[TRANSCRIBE] done {(time.time()-tr_t0):.1f}s")
+        print(f"[TRANSCRIBE] done {(time.time() - tr_t0):.1f}s")
 
     # Guard: ensure we have any non-empty transcription before translating
     if not any(s.strip() for s in minimal_outputs):
@@ -449,20 +547,29 @@ def process_audio_fixed_duration(
         print("[TRANSLATE] resume", flush=True)
         translated_outputs: List[str] = []
         for i in range(len(minimal_outputs)):
-            t_path = os.path.join(work_output_dir, "translated", f"segment_{i}_translated.txt")
+            t_path = os.path.join(
+                work_output_dir, "translated", f"segment_{i}_translated.txt"
+            )
             try:
                 with open(t_path, "r", encoding="utf-8") as f:
-                    translated_outputs.append(clean_minimal_text(f.read()))
+                    translated_outputs.append(clean_json_text(f.read()))
             except Exception:
                 translated_outputs.append("")
     else:
         print("[TRANSLATE] start", flush=True)
         tl_t0 = time.time()
         translated_outputs = _translate_segments(
-            minimal_outputs, source_language, target_language, translation_models, work_output_dir, verbose,
-            translate_timeout_s, translate_max_retries, translate_retry_wait_s,
+            minimal_outputs,
+            source_language,
+            target_language,
+            translation_models,
+            work_output_dir,
+            verbose,
+            translate_timeout_s,
+            translate_max_retries,
+            translate_retry_wait_s,
         )
-        print(f"[TRANSLATE] done {(time.time()-tl_t0):.1f}s")
+        print(f"[TRANSLATE] done {(time.time() - tl_t0):.1f}s")
 
     if not any(t.strip() for t in translated_outputs):
         raise RuntimeError("Translation failed: all segments empty")
@@ -472,14 +579,10 @@ def process_audio_fixed_duration(
         print("[ASSEMBLE] skip (existing SRT)", flush=True)
     else:
         print("[ASSEMBLE] start", flush=True)
-        srt_text = assemble_srt_from_minimal_segments(
-            translated_outputs, offsets_ms
-        )
+        srt_text = assemble_srt_from_json_segments(translated_outputs, offsets_ms)
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(srt_text)
         print(f"[ASSEMBLE] wrote {out_path}")
-
-    # No SRT post-validation: we validate/fix at source (transcription/translation minimal outputs)
 
     if cleanup:
         try:

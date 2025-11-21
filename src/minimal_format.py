@@ -1,16 +1,15 @@
-"""XmYsZms-only minimal format parsing and SRT assembly."""
+"""JSON-based minimal format parsing and SRT assembly."""
 
+import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
-
-# Strict bracketed minimal line: [<start>-<end>]: text
-TIME_LINE_RE = re.compile(r'^\s*\[(.+?)\s*-\s*(.+?)\]\s*:\s*(.+?)\s*$')
 
 # Strict token: optional minutes, optional seconds, optional milliseconds
 TIME_TOKEN_RE = re.compile(
     r"^\s*(?:(\d+)\s*m)?\s*(?:(\d{1,2})\s*s)?\s*(?:(\d{1,3})\s*ms)?\s*$",
     re.IGNORECASE,
 )
+
 
 def parse_time_value_to_ms(value: Any) -> Optional[int]:
     """Parse XmYsZms-like token into milliseconds.
@@ -25,7 +24,9 @@ def parse_time_value_to_ms(value: Any) -> Optional[int]:
         return None
     if isinstance(value, (int, float)):
         # Treat as milliseconds if int, seconds if float
-        return max(0, int(round(value)) if isinstance(value, int) else int(round(value * 1000)))
+        return max(
+            0, int(round(value)) if isinstance(value, int) else int(round(value * 1000))
+        )
     if isinstance(value, str):
         v = value.strip()
         m = TIME_TOKEN_RE.match(v)
@@ -33,10 +34,11 @@ def parse_time_value_to_ms(value: Any) -> Optional[int]:
             return None
         mm = int(m.group(1) or 0)
         ss = int(m.group(2) or 0)
-        ms_part = (m.group(3) or '0')
-        ms = int(ms_part.ljust(3, '0'))
+        ms_part = m.group(3) or "0"
+        ms = int(ms_part.ljust(3, "0"))
         return ((mm * 60) + ss) * 1000 + ms
     return None
+
 
 def ms_to_hhmmssms(total_ms: int) -> str:
     """Convert milliseconds to a standard SRT timestamp string HH:MM:SS,ms."""
@@ -50,54 +52,6 @@ def ms_to_hhmmssms(total_ms: int) -> str:
     h = total_min // 60
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
-def _normalize_text_for_compare(s: str) -> str:
-    """Normalize text for comparison by lowercasing and removing punctuation."""
-    import unicodedata as _ud
-    s2 = _ud.normalize("NFKC", s).lower()
-    return " ".join("".join(c for c in s2 if not _ud.category(c).startswith(('P', 'M'))).split())
-
-def parse_minimal_lines(text: str) -> List[Dict[str, Any]]:
-    """Parse minimal lines strictly: [XmYsZms-XmYsZms]: text.
-
-    - Tolerates surrounding quotes on the whole line.
-    - Ignores lines that don't match or have invalid times.
-    """
-    items: List[Dict[str, Any]] = []
-    if not text:
-        return items
-
-    for raw in text.strip().splitlines():
-        line = raw.strip()
-        # Tolerate lines wrapped in matching quotes (some models echo quotes from instructions)
-        if (len(line) >= 2 and ((line[0] == line[-1]) and line[0] in ('"', "'", '“', '”'))):
-            # Handle symmetric fancy quotes as well
-            if (line[0] == '“' and line[-1] == '”') or (line[0] in ('"', "'") and line[-1] == line[0]):
-                line = line[1:-1].strip()
-        if not line:
-            continue
-
-        start_raw: Optional[str] = None
-        end_raw: Optional[str] = None
-        content: Optional[str] = None
-
-        m = TIME_LINE_RE.match(line)
-        if m:
-            start_raw, end_raw, content = m.groups()
-
-        if start_raw is None or end_raw is None or content is None:
-            continue
-
-        start_ms = parse_time_value_to_ms(start_raw)
-        end_ms = parse_time_value_to_ms(end_raw)
-        if start_ms is None or end_ms is None:
-            continue
-        text_val = content.strip()
-        if not text_val or end_ms <= start_ms:
-            continue
-        items.append({"start_ms": start_ms, "end_ms": end_ms, "text": text_val})
-
-    items.sort(key=lambda d: (d["start_ms"], d["end_ms"]))
-    return items
 
 def format_ms_xmys(total_ms: int) -> str:
     """Format milliseconds as XmYsZms, omitting zero components."""
@@ -118,39 +72,95 @@ def format_ms_xmys(total_ms: int) -> str:
     return "".join(parts) if parts else "0s"
 
 
-def clean_minimal_text(text: str) -> str:
-    """Validate and fix minimal transcript/translation lines.
+def parse_json_segments(text: str) -> List[Dict[str, Any]]:
+    """Parse JSON list of segments: [{"start": "...", "end": "...", "text": "..."}].
 
-    - Keeps only lines of the form [start-end]: text with XmYsZms times.
-    - Strips surrounding quotes.
-    - Ensures end > start; if swapped, swap back.
-    - Re-emits in canonical formatting using XmYsZms.
+    Handles Markdown code blocks (```json ... ```) if present.
     """
-    items = parse_minimal_lines(text)
-    cleaned: List[str] = []
+    text = text.strip()
+    if not text:
+        return []
+
+    # Strip markdown code blocks if present
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        # Fallback: try to find the first '[' and last ']'
+        start_idx = text.find("[")
+        end_idx = text.rfind("]")
+        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+            try:
+                data = json.loads(text[start_idx : end_idx + 1])
+            except json.JSONDecodeError:
+                return []
+        else:
+            return []
+
+    if not isinstance(data, list):
+        return []
+
+    items: List[Dict[str, Any]] = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        start_raw = entry.get("start")
+        end_raw = entry.get("end")
+        content = entry.get("text")
+
+        if start_raw is None or end_raw is None or content is None:
+            continue
+
+        start_ms = parse_time_value_to_ms(start_raw)
+        end_ms = parse_time_value_to_ms(end_raw)
+
+        if start_ms is None or end_ms is None:
+            continue
+
+        text_val = str(content).strip()
+        if not text_val or end_ms <= start_ms:
+            continue
+
+        items.append({"start_ms": start_ms, "end_ms": end_ms, "text": text_val})
+
+    items.sort(key=lambda d: (d["start_ms"], d["end_ms"]))
+    return items
+
+
+def clean_json_text(text: str) -> str:
+    """Validate and fix JSON transcript/translation.
+
+    Re-emits valid JSON list.
+    """
+    items = parse_json_segments(text)
+    cleaned: List[Dict[str, str]] = []
     for it in items:
         s = it["start_ms"]
         e = it["end_ms"]
-        t = it["text"].strip()
-        if not t:
-            continue
+        t = it["text"]
         if e <= s:
             s, e = e, s  # swap
-        cleaned.append(f"[{format_ms_xmys(s)}-{format_ms_xmys(e)}]: {t}")
-    return "\n".join(cleaned)
+        cleaned.append(
+            {"start": format_ms_xmys(s), "end": format_ms_xmys(e), "text": t}
+        )
+    return json.dumps(cleaned, ensure_ascii=False, indent=2)
 
 
-def assemble_srt_from_minimal_segments(
+def assemble_srt_from_json_segments(
     segment_outputs: List[str],
     offsets_ms: List[int],
 ) -> str:
-    """Assemble final SRT by strictly parsing minimal lines and offsetting.
-
-    No rebasing, clamping, or legacy fallbacks.
-    """
+    """Assemble final SRT from JSON segment outputs."""
     entries: List[Tuple[int, int, str]] = []
     for idx, text in enumerate(segment_outputs):
-        items = parse_minimal_lines(text)
+        items = parse_json_segments(text)
         if not items:
             continue
         off = offsets_ms[idx]
@@ -160,6 +170,10 @@ def assemble_srt_from_minimal_segments(
             if e <= s:
                 continue
             entries.append((s, e, it["text"]))
+
     entries.sort(key=lambda t: (t[0], t[1]))
-    srt_lines = [f"{i+1}\n{ms_to_hhmmssms(s)} --> {ms_to_hhmmssms(e)}\n{c}\n" for i, (s, e, c) in enumerate(entries)]
+    srt_lines = [
+        f"{i + 1}\n{ms_to_hhmmssms(s)} --> {ms_to_hhmmssms(e)}\n{c}\n"
+        for i, (s, e, c) in enumerate(entries)
+    ]
     return "\n".join(srt_lines)
