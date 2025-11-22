@@ -295,11 +295,14 @@ def _translate_segments(
         json_input = json.dumps(orig_texts, ensure_ascii=False, indent=2)
 
         prompt = (
-            f"Translate from {source_language} to {target_language}.\n"
-            f"You will receive a JSON list of strings.\n"
-            f"Output ONLY a JSON list of translated strings, in the SAME order.\n"
+            f"Role: You are an expert subtitle translator for movies and TV shows.\n"
+            f"Task: Translate the following dialogue segments from {source_language} to {target_language}.\n"
+            f"Guidelines:\n"
+            f"1. Translation Style: Natural, idiomatic, and suitable for subtitles. Avoid literal translations. Capture the tone, nuance, and cultural context of the original movie dialogue.\n"
+            f"2. Constraints: Maintain the exact same number of elements as the input list. Keep translations concise to fit subtitle timing standards.\n"
+            f"3. Output Format: Return ONLY a valid JSON list of strings matching the input order exactly.\n"
             f"Input:\n{json_input}\n\n"
-            f"Output:\n"
+            f"Output JSON:\n"
         )
 
         # Call primary model with fixed-interval retries (no fallbacks)

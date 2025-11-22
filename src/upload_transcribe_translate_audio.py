@@ -16,15 +16,18 @@ RATE_LIMIT_ERRORS = (
     "Resource has been exhausted",
 )
 
-TRANSCRIPTION_PROMPT_TEMPLATE = """Transcribe speech in {source_language}.
-Output ONLY a JSON list of objects in this EXACT format:
+TRANSCRIPTION_PROMPT_TEMPLATE = """Role: Expert Movie Transcriber.
+Task: Transcribe the speech in {source_language} accurately, capturing dialogue for subtitles.
+Output Format: Provide a JSON list of objects strictly adhering to this schema:
 [
   {{"start": "XmYsZms", "end": "XmYsZms", "text": "..."}},
   ...
 ]
-Rules:
-- start,end are in format XmYsZms. Example 9m32s839ms is 9 minutes, 32 seconds, and 839 milliseconds.
-- Group words into readable phrases suitable for subtitles (max 1–2 sentences per line).
+Requirements:
+1. Timestamps: Use the format 'XmYsZms' (e.g., 9m32s839ms). This implies Minutes, Seconds, Milliseconds.
+2. Segmentation: Break text into natural subtitle lines (1-2 sentences max). Avoid extremely long segments.
+3. Accuracy: Transcribe exactly what is said.
+4. Reliability: Ensure the JSON is valid and the "start" and "end" keys are present for every segment.
 """
 
 
