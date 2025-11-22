@@ -54,6 +54,7 @@ def find_downloader() -> List[str]:
                 return v
     # Try common absolute paths
     candidates = [
+        os.path.abspath("yt-dlp"),
         "/usr/local/bin/yt-dlp",
         "/usr/bin/yt-dlp",
         "/usr/local/bin/youtube-dl",

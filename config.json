@@ -1,5 +1,5 @@
 {
-  "path_to_vid": "dummy_video.mp4",
+  "path_to_vid": "https://www.youtube.com/watch?v=UHCBTk3MbPE",
   "source_language": "Arabic",
   "target_language": "Latin American Spanish",
   "output_dir": "output_srt",
@@ -17,5 +17,5 @@
   "translate_max_retries": 3,
   "transcribe_retry_wait_s": 0,
   "translate_retry_wait_s": 0,
-  "start_step": 3
+  "start_step": 0
 }
