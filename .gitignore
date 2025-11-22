@@ -39,6 +39,7 @@ TestResults.xml
 *.part
 *.tmp
 # Large video files
+output_srt_good
 *.avi
 *.mov
 *.wmv
