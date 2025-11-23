@@ -2,6 +2,8 @@
 
 Generate accurate, timestamped subtitles from long videos by downloading (or using local media), extracting audio, splitting into segments, transcribing and translating with Gemini models, and assembling a final SRT. The pipeline is restartable at any step and is resilient to malformed model outputs.
 
+![Open Translate Pipeline flow](openSub.png)
+
 ## Features
 - YouTube download via `yt-dlp` (local videos supported).
 - Robust audio extraction to M4A, then fixed-duration segmentation.
