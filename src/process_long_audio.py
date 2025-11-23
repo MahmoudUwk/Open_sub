@@ -62,89 +62,98 @@ def _transcribe_segments(
     verbose: bool,
     transcribe_timeout_s: int,
     transcribe_retry_wait_s: int,
+    transcribe_max_attempts: int,
+    max_workers: int,
 ) -> List[str]:
-    """Transcribe each audio segment sequentially."""
-    minimal_outputs = []
+    """Transcribe audio segments with bounded retries and concurrency."""
+    minimal_outputs = [""] * len(seg_paths)
 
-    # Use ThreadPoolExecutor for timeouts instead of multiprocessing
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-
-    for i, seg_path in enumerate(seg_paths):
-        model = transcription_models[i % len(transcription_models)]
+    def _transcribe_one(idx: int, seg_path: str, model: str) -> None:
+        attempts = 0
         try:
             while True:
+                if attempts >= transcribe_max_attempts:
+                    raise RuntimeError("max attempts exceeded")
+                attempts += 1
                 start_time = time.time()
-                future = executor.submit(
-                    _call_model_for_segment,
-                    seg_path,
-                    source_language,
-                    model,
-                    _guess_mime_type_from_extension(seg_path),
-                    verbose,
-                )
-
-                try:
-                    outcome = future.result(timeout=transcribe_timeout_s)
-                    err = None
-                except concurrent.futures.TimeoutError:
-                    outcome = None
-                    err = "timeout"
-                except Exception as e:
-                    outcome = None
-                    err = str(e)
+                # Use inner executor to enforce timeout per attempt
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as inner:
+                    fut = inner.submit(
+                        _call_model_for_segment,
+                        seg_path,
+                        source_language,
+                        model,
+                        _guess_mime_type_from_extension(seg_path),
+                        verbose,
+                    )
+                    try:
+                        outcome = fut.result(timeout=transcribe_timeout_s)
+                        err = None
+                    except concurrent.futures.TimeoutError:
+                        fut.cancel()
+                        outcome = None
+                        err = "timeout"
+                    except Exception as e:
+                        fut.cancel()
+                        outcome = None
+                        err = str(e)
 
                 duration = time.time() - start_time
                 if err == "timeout":
-                    print(f"[TR] seg {i} timeout {transcribe_timeout_s}s", flush=True)
-                    print(
-                        f"[TR] wait {transcribe_retry_wait_s}s before retry...",
-                        flush=True,
-                    )
+                    print(f"[TR] seg {idx} timeout {transcribe_timeout_s}s", flush=True)
                     time.sleep(transcribe_retry_wait_s)
-                    continue  # Retry same segment indefinitely on timeout
+                    continue
                 if err:
-                    print(f"[TR] seg {i} error {duration:.1f}s: {err}", flush=True)
-                    print(
-                        f"[TR] wait {transcribe_retry_wait_s}s before retry...",
-                        flush=True,
-                    )
+                    print(f"[TR] seg {idx} error {duration:.1f}s: {err}", flush=True)
                     time.sleep(transcribe_retry_wait_s)
                     continue
                 if not outcome or not outcome.strip():
-                    # Empty but not an exception: wait and retry indefinitely
-                    print(f"[TR] seg {i} empty {duration:.1f}s", flush=True)
-                    print(
-                        f"[TR] wait {transcribe_retry_wait_s}s before retry...",
-                        flush=True,
-                    )
+                    print(f"[TR] seg {idx} empty {duration:.1f}s", flush=True)
                     time.sleep(transcribe_retry_wait_s)
                     continue
 
-                # Validate JSON
                 try:
                     cleaned = clean_json_text(str(outcome))
+                    parsed = parse_json_segments(cleaned)
+                    if not parsed:
+                        raise ValueError("parsed entries empty")
                 except Exception as e:
-                    print(f"[TR] seg {i} invalid json {duration:.1f}s: {e}", flush=True)
-                    print(
-                        f"[TR] wait {transcribe_retry_wait_s}s before retry...",
-                        flush=True,
-                    )
+                    print(f"[TR] seg {idx} invalid json {duration:.1f}s: {e}", flush=True)
                     time.sleep(transcribe_retry_wait_s)
                     continue
 
-                minimal_outputs.append(cleaned)
-                # Always show a single concise success line for non-empty output
-                print(f"[TR] seg {i} ok {duration:.1f}s")
-                raw_path = os.path.join(output_dir, "raw", f"segment_{i}_raw.txt")
+                minimal_outputs[idx] = cleaned
+                raw_path = os.path.join(output_dir, "raw", f"segment_{idx}_raw.txt")
                 with open(raw_path, "w", encoding="utf-8") as f:
                     f.write(outcome)
-                break
+                print(f"[TR] seg {idx} ok {duration:.1f}s")
+                return
         except Exception as e:
-            # Unexpected error in wrapper
-            print(f"[TR] seg {i} error: {str(e)}")
-            minimal_outputs.append("")
+            print(f"[TR] seg {idx} error: {str(e)}; using placeholder transcript")
+            dur_ms = get_audio_duration_ms(seg_path) or (60 * 1000)
+            placeholder = [
+                {
+                    "start": format_ms_xmys(0),
+                    "end": format_ms_xmys(dur_ms),
+                    "text": "[untranscribed]",
+                }
+            ]
+            cleaned = json.dumps(placeholder, ensure_ascii=False, indent=2)
+            minimal_outputs[idx] = cleaned
+            raw_path = os.path.join(output_dir, "raw", f"segment_{idx}_raw.txt")
+            try:
+                with open(raw_path, "w", encoding="utf-8") as f:
+                    f.write(cleaned)
+            except Exception:
+                pass
 
-    executor.shutdown(wait=False)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = []
+        for i, seg_path in enumerate(seg_paths):
+            model = transcription_models[i % len(transcription_models)]
+            futures.append(pool.submit(_transcribe_one, i, seg_path, model))
+        concurrent.futures.wait(futures)
+
     return minimal_outputs
 
 
@@ -158,52 +167,76 @@ def _translate_segments(
     translate_timeout_s: int,
     translate_max_retries: int,
     translate_retry_wait_s: int,
+    translate_max_empty_attempts: int,
+    segment_durations_ms: Optional[List[int]],
+    max_workers: int,
 ) -> List[str]:
     """Translate each transcribed segment with configurable fallbacks."""
-    translated_outputs = []
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    translated_outputs = [""] * len(minimal_outputs)
 
-    def _call_once(m: str, text: str) -> tuple[str, str | None]:
-        try:
-            client = genai.Client()
-            response = client.models.generate_content(
-                model=m,
-                contents=text,
-                config=genai.types.GenerateContentConfig(
-                    safety_settings=[
-                        genai.types.SafetySetting(
-                            category=genai.types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-                            threshold=genai.types.HarmBlockThreshold.BLOCK_NONE,
-                        )
-                    ]
-                ),
-            )
-            t = (getattr(response, "text", None) or "").strip()
-            return t, None
-        except Exception as e:
-            return "", str(e)
+    def _strip_code_fences(text: str) -> str:
+        """Remove Markdown fences that break JSON parsing."""
+        t = (text or "").strip()
+        if not t.startswith("```"):
+            return t
+        lines = t.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        return "\n".join(lines).strip()
 
-    def _call_with_retries(m: str, text: str, max_retries: int, validator=None):
+    def _call_with_retries(
+        m: str,
+        text: str,
+        max_retries: int,
+        validator=None,
+        postprocess=None,
+        max_empty_attempts: int = 6,
+        translate_timeout_s: int = 90,
+    ):
         attempts = 0
         timeouts = 0
         errors = 0
         last_err = None
         non_timeout_attempts = 0
+        empty_attempts = 0
         while True:
             attempt = attempts + 1
             attempts += 1
             a_t0 = time.time()
 
-            future = executor.submit(_call_once, m, text)
-            try:
-                res = future.result(timeout=translate_timeout_s)
-                to_err = None
-            except concurrent.futures.TimeoutError:
-                res = None
-                to_err = "timeout"
-            except Exception as e:
-                res = None
-                to_err = str(e)
+            def _call_once() -> tuple[str, str | None]:
+                try:
+                    client = genai.Client()
+                    response = client.models.generate_content(
+                        model=m,
+                        contents=text,
+                        config=genai.types.GenerateContentConfig(
+                            safety_settings=[
+                                genai.types.SafetySetting(
+                                    category=genai.types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                                    threshold=genai.types.HarmBlockThreshold.BLOCK_NONE,
+                                )
+                            ]
+                        ),
+                    )
+                    t = (getattr(response, "text", None) or "").strip()
+                    return t, None
+                except Exception as exc:
+                    return "", str(exc)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as inner:
+                fut = inner.submit(_call_once)
+                try:
+                    res = fut.result(timeout=translate_timeout_s)
+                    to_err = None
+                except concurrent.futures.TimeoutError:
+                    res = None
+                    to_err = "timeout"
+                except Exception as e:
+                    res = None
+                    to_err = str(e)
 
             a_dur = time.time() - a_t0
             t = ""
@@ -228,6 +261,8 @@ def _translate_segments(
                 else:
                     # Defensive: if library changes
                     t = (res or "") if isinstance(res, str) else ""
+                if postprocess:
+                    t = postprocess(t)
                 # Apply optional post-condition validator
                 if t and callable(validator):
                     ok, reason = validator(t)
@@ -239,11 +274,19 @@ def _translate_segments(
                     # Empty response: retry indefinitely (do not count against max_retries)
                     errors += 1
                     last_err = err or "empty"
+                    empty_attempts += 1
                     if verbose:
                         msg = err or "empty"
                         print(
                             f"[TL] {m} attempt {attempt}: {msg} {a_dur:.1f}s (retrying indefinitely on empty)"
                         )
+                    if empty_attempts >= max_empty_attempts:
+                        return "", {
+                            "attempts": attempts,
+                            "timeouts": timeouts,
+                            "errors": errors,
+                            "last_error": last_err or "empty_limit",
+                        }
                     print(
                         f"[TL] wait {translate_retry_wait_s}s before retry...",
                         flush=True,
@@ -277,11 +320,11 @@ def _translate_segments(
                     "last_error": last_err,
                 }
 
-    for i, out in enumerate(minimal_outputs):
+    def _translate_one(i: int, out: str) -> None:
         if not out.strip():
-            translated_outputs.append("")
+            translated_outputs[i] = ""
             print(f"[TL] seg {i} skip-empty")
-            continue
+            return
 
         model = translation_models[i % len(translation_models)]
 
@@ -289,23 +332,27 @@ def _translate_segments(
         items = parse_json_segments(clean_json_text(out))
         orig_texts = [it["text"] for it in items]
         time_pairs = [(int(it["start_ms"]), int(it["end_ms"])) for it in items]
+        seg_cap = None
+        if segment_durations_ms and i < len(segment_durations_ms):
+            seg_cap = int(segment_durations_ms[i])
 
         # Prepare JSON input for translation
         # We send a list of strings to translate
         json_input = json.dumps(orig_texts, ensure_ascii=False, indent=2)
 
         prompt = (
-            f"Role: You are an expert subtitle translator for movies and TV shows.\n"
-            f"Task: Translate the following dialogue segments from {source_language} to {target_language}.\n"
+            f"Role: Expert subtitle translator for scripted dialogue.\n"
+            f"Task: Translate each line from {source_language} to {target_language} while keeping meaning precise.\n"
             f"Guidelines:\n"
-            f"1. Translation Style: Natural, idiomatic, and suitable for subtitles. Avoid literal translations. Capture the tone, nuance, and cultural context of the original movie dialogue.\n"
-            f"2. Constraints: Maintain the exact same number of elements as the input list. Keep translations concise to fit subtitle timing standards.\n"
-            f"3. Output Format: Return ONLY a valid JSON list of strings matching the input order exactly.\n"
-            f"Input:\n{json_input}\n\n"
+            f"- Fidelity: Do not summarize or omit any detail. Preserve speaker intent, tone, names, and numbers. If unsure, copy the source text instead of leaving blanks.\n"
+            f"- Alignment: Output the same number of items, in the same order, with no merging or splitting.\n"
+            f"- Brevity: Keep lines concise for subtitle timing; avoid adding explanations.\n"
+            f"- Format: Return ONLY a valid JSON list of strings (no markdown fences, no keys).\n"
+            f"Input list:\n{json_input}\n\n"
             f"Output JSON:\n"
         )
 
-        # Call primary model with fixed-interval retries (no fallbacks)
+        # Call models with fixed-interval retries (with fallbacks)
         t0 = time.time()
 
         def json_validator(text):
@@ -322,67 +369,109 @@ def _translate_segments(
             except json.JSONDecodeError:
                 return False, "invalid json"
 
-        trans_text, stats = _call_with_retries(
-            model, prompt, max_retries=translate_max_retries, validator=json_validator
-        )
+        model_order = [model] + [m for m in translation_models if m != model]
+        trans_text = ""
+        stats = {}
+        chosen_model = None
+        total_attempts = 0
+        for cand in model_order:
+            trans_text, stats = _call_with_retries(
+                cand,
+                prompt,
+                max_retries=translate_max_retries,
+                validator=json_validator,
+                postprocess=_strip_code_fences,
+                max_empty_attempts=translate_max_empty_attempts,
+                translate_timeout_s=translate_timeout_s,
+            )
+            total_attempts += stats.get("attempts", 0) if stats else 0
+            if trans_text.strip():
+                chosen_model = cand
+                break
         dur = time.time() - t0
 
-        if not trans_text.strip():
-            last_err = stats.get("last_error") or ""
-            err_low = last_err.lower() if isinstance(last_err, str) else ""
-            rate_limited = (
-                any(k.lower() in err_low for k in RATE_LIMIT_ERRORS)
-                if last_err
-                else False
+        translated_lines_raw = []
+        used_source_fallback = False
+
+        if trans_text.strip():
+            try:
+                translated_lines_raw = json.loads(trans_text)
+            except Exception as e:
+                if verbose:
+                    print(f"[TL] seg {i} parse error on {chosen_model}: {e}")
+                translated_lines_raw = list(orig_texts)
+                used_source_fallback = True
+        else:
+            translated_lines_raw = list(orig_texts)
+            used_source_fallback = True
+
+        # Align counts
+        if len(translated_lines_raw) < len(orig_texts):
+            translated_lines_raw += orig_texts[len(translated_lines_raw) :]
+        else:
+            translated_lines_raw = translated_lines_raw[: len(orig_texts)]
+
+        safe_texts = []
+        for src, t_line in zip(orig_texts, translated_lines_raw):
+            cleaned = str(t_line).strip()
+            if not cleaned:
+                cleaned = src.strip()
+            safe_texts.append(cleaned)
+
+        reconstructed = []
+        for (s, e), t_line in zip(time_pairs, safe_texts):
+            if seg_cap is not None:
+                s = max(0, min(s, seg_cap))
+                e = max(0, min(e, seg_cap))
+            if e <= s:
+                e = s + 1
+            if seg_cap is not None and e > seg_cap:
+                e = seg_cap
+            reconstructed.append(
+                {
+                    "start": format_ms_xmys(s),
+                    "end": format_ms_xmys(e),
+                    "text": t_line,
+                }
             )
-            tag = "rate_limit" if rate_limited else "empty"
+
+        cleaned_t = json.dumps(reconstructed, ensure_ascii=False, indent=2)
+        translated_outputs[i] = cleaned_t
+        translated_path = os.path.join(
+            output_dir, "translated", f"segment_{i}_translated.txt"
+        )
+        with open(translated_path, "w", encoding="utf-8") as f:
+            f.write(cleaned_t)
+
+        last_err = stats.get("last_error") if isinstance(stats, dict) else None
+        err_low = last_err.lower() if isinstance(last_err, str) else ""
+        rate_limited = (
+            any(k.lower() in err_low for k in RATE_LIMIT_ERRORS) if last_err else False
+        )
+        if used_source_fallback:
+            tag = "rate_limit" if rate_limited else "fallback-source"
             snippet = (
-                (last_err[:120] + "...")
-                if isinstance(last_err, str) and len(last_err) > 120
-                else (last_err or "")
+                (err_low[:120] + "...")
+                if isinstance(err_low, str) and len(err_low) > 120
+                else (err_low or "")
             )
             print(
-                f"[TL] seg {i} {tag} {dur:.1f}s attempts={stats.get('attempts', 0)} "
-                f"timeouts={stats.get('timeouts', 0)} errors={stats.get('errors', 0)} last_err={snippet!r}"
+                f"[TL] seg {i} {tag} {dur:.1f}s attempts={total_attempts} "
+                f"timeouts={stats.get('timeouts', 0) if stats else 0} "
+                f"errors={stats.get('errors', 0) if stats else 0} last_err={snippet!r}"
             )
-            translated_outputs.append("")
-            continue
         else:
-            print(f"[TL] seg {i} ok {dur:.1f}s attempts={stats.get('attempts', 0)}")
-
-        # Reconstruct JSON segments with original timestamps
-        try:
-            translated_lines = json.loads(trans_text)
-            # Align counts (should be handled by validator, but double check)
-            if len(translated_lines) < len(orig_texts):
-                translated_lines += orig_texts[len(translated_lines) :]
-            else:
-                translated_lines = translated_lines[: len(orig_texts)]
-
-            reconstructed = []
-            for (s, e), t in zip(time_pairs, translated_lines):
-                if str(t).strip():
-                    reconstructed.append(
-                        {
-                            "start": format_ms_xmys(s),
-                            "end": format_ms_xmys(e),
-                            "text": t.strip(),
-                        }
-                    )
-
-            cleaned_t = json.dumps(reconstructed, ensure_ascii=False, indent=2)
-            translated_outputs.append(cleaned_t)
-            translated_path = os.path.join(
-                output_dir, "translated", f"segment_{i}_translated.txt"
+            extra = ""
+            if chosen_model and chosen_model != model:
+                extra = f" (fallback model {chosen_model})"
+            print(
+                f"[TL] seg {i} ok {dur:.1f}s attempts={total_attempts}{extra}"
             )
-            with open(translated_path, "w", encoding="utf-8") as f:
-                f.write(cleaned_t)
 
-        except Exception as e:
-            print(f"[TL] seg {i} reconstruction error: {e}")
-            translated_outputs.append("")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(_translate_one, i, out) for i, out in enumerate(minimal_outputs)]
+        concurrent.futures.wait(futures)
 
-    executor.shutdown(wait=False)
     return translated_outputs
 
 
@@ -404,6 +493,9 @@ def process_audio_fixed_duration(
     translate_max_retries: Optional[int] = None,
     transcribe_retry_wait_s: Optional[int] = None,
     translate_retry_wait_s: Optional[int] = None,
+    transcribe_max_attempts: Optional[int] = None,
+    translate_max_empty_attempts: Optional[int] = None,
+    concurrency: Optional[int] = None,
 ) -> str:
     """Split audio by duration, transcribe, translate, and assemble SRT."""
     if not transcription_models:
@@ -417,6 +509,9 @@ def process_audio_fixed_duration(
     translate_max_retries = int(translate_max_retries or 3)
     transcribe_retry_wait_s = int(transcribe_retry_wait_s or 20)
     translate_retry_wait_s = int(translate_retry_wait_s or 20)
+    transcribe_max_attempts = int(transcribe_max_attempts or 6)
+    translate_max_empty_attempts = int(translate_max_empty_attempts or 6)
+    concurrency = int(concurrency or 1)
 
     if not os.path.exists(input_audio):
         raise FileNotFoundError(f"Input audio not found: {input_audio}")
@@ -449,7 +544,9 @@ def process_audio_fixed_duration(
                 isinstance(saved_paths, list)
                 and isinstance(saved_offsets, list)
                 and len(saved_paths) == len(saved_offsets)
-                and (not saved_durations or len(saved_durations) == len(saved_paths))
+                and saved_durations
+                and isinstance(saved_durations, list)
+                and len(saved_durations) == len(saved_paths)
                 and all(isinstance(p, str) and os.path.exists(p) for p in saved_paths)
             ):
                 seg_paths = list(saved_paths)
@@ -515,6 +612,9 @@ def process_audio_fixed_duration(
     ):
         raise RuntimeError("Segmenting failed: missing or tiny segment files")
     print(f"[SPLIT] ready {len(seg_paths)} segs {(time.time() - split_t0):.1f}s")
+    durations_available = bool(seg_durations_ms) and len(seg_durations_ms) == len(seg_paths)
+    if not durations_available and verbose:
+        print("[SPLIT] warning: segment durations missing; assembly clamping disabled")
 
     minimal_outputs: List[str]
     if start_step.lower() in ("translate", "assemble"):
@@ -523,11 +623,33 @@ def process_audio_fixed_duration(
         minimal_outputs = []
         for i in range(len(seg_paths)):
             raw_path = os.path.join(work_output_dir, "raw", f"segment_{i}_raw.txt")
+            dur_ms = (
+                seg_durations_ms[i]
+                if seg_durations_ms and i < len(seg_durations_ms)
+                else (get_audio_duration_ms(seg_paths[i]) or 60 * 1000)
+            )
+            placeholder = json.dumps(
+                [
+                    {
+                        "start": format_ms_xmys(0),
+                        "end": format_ms_xmys(dur_ms),
+                        "text": "[untranscribed]",
+                    }
+                ],
+                ensure_ascii=False,
+                indent=2,
+            )
             try:
                 with open(raw_path, "r", encoding="utf-8") as f:
-                    minimal_outputs.append(clean_json_text(f.read()))
+                    raw_text = f.read()
+                if raw_text.strip():
+                    minimal_outputs.append(clean_json_text(raw_text))
+                else:
+                    print(f"[TRANSCRIBE] seg {i} missing/empty raw; using placeholder")
+                    minimal_outputs.append(placeholder)
             except Exception:
-                minimal_outputs.append("")
+                print(f"[TRANSCRIBE] seg {i} missing/invalid raw; using placeholder")
+                minimal_outputs.append(placeholder)
     else:
         print("[TRANSCRIBE] start", flush=True)
         tr_t0 = time.time()
@@ -539,6 +661,8 @@ def process_audio_fixed_duration(
             verbose,
             transcribe_timeout_s,
             transcribe_retry_wait_s,
+            transcribe_max_attempts,
+            concurrency,
         )
         print(f"[TRANSCRIBE] done {(time.time() - tr_t0):.1f}s")
 
@@ -571,6 +695,9 @@ def process_audio_fixed_duration(
             translate_timeout_s,
             translate_max_retries,
             translate_retry_wait_s,
+            translate_max_empty_attempts,
+            seg_durations_ms if durations_available else None,
+            concurrency,
         )
         print(f"[TRANSLATE] done {(time.time() - tl_t0):.1f}s")
 
@@ -582,7 +709,11 @@ def process_audio_fixed_duration(
         print("[ASSEMBLE] skip (existing SRT)", flush=True)
     else:
         print("[ASSEMBLE] start", flush=True)
-        srt_text = assemble_srt_from_json_segments(translated_outputs, offsets_ms)
+        srt_text = assemble_srt_from_json_segments(
+            translated_outputs,
+            offsets_ms,
+            seg_durations_ms if durations_available else None,
+        )
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(srt_text)
         print(f"[ASSEMBLE] wrote {out_path}")

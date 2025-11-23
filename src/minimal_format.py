@@ -9,6 +9,12 @@ TIME_TOKEN_RE = re.compile(
     r"^\s*(?:(\d+)\s*m)?\s*(?:(\d{1,2})\s*s)?\s*(?:(\d{1,3})\s*ms)?\s*$",
     re.IGNORECASE,
 )
+# Standard SRT-style timestamp: HH:MM:SS,mmm or H:MM:SS.mmm (hours optional)
+TIME_COLON_RE = re.compile(
+    r"^\s*(?:(\d{1,2}):)?(\d{1,2}):(\d{1,2})(?:[.,](\d{1,3}))?\s*$"
+)
+# MM:SS,mmm short-hand (no hours)
+TIME_MINSEC_RE = re.compile(r"^\s*(\d{1,2}):(\d{2})(?:[.,](\d{1,3}))?\s*$")
 
 
 def parse_time_value_to_ms(value: Any) -> Optional[int]:
@@ -19,6 +25,8 @@ def parse_time_value_to_ms(value: Any) -> Optional[int]:
     - 1m2s
     - 32s
     - 839ms
+    - 01:02:03,456
+    - 02:15.4 (MM:SS.mmm)
     """
     if value is None:
         return None
@@ -29,13 +37,37 @@ def parse_time_value_to_ms(value: Any) -> Optional[int]:
         )
     if isinstance(value, str):
         v = value.strip()
+        # Handle SRT-style colon format first
+        m_colon = TIME_COLON_RE.match(v)
+        if m_colon:
+            h = int(m_colon.group(1) or 0)
+            m = int(m_colon.group(2) or 0)
+            s = int(m_colon.group(3) or 0)
+            frac = m_colon.group(4) or ""
+            ms_frac = int((frac + "000")[:3]) if frac else 0  # treat as fractional seconds
+            return ((h * 3600 + m * 60 + s) * 1000) + ms_frac
+        m_minsec = TIME_MINSEC_RE.match(v)
+        if m_minsec:
+            m = int(m_minsec.group(1) or 0)
+            s = int(m_minsec.group(2) or 0)
+            frac = m_minsec.group(3) or ""
+            ms_frac = int((frac + "000")[:3]) if frac else 0
+            return ((m * 60 + s) * 1000) + ms_frac
+
         m = TIME_TOKEN_RE.match(v)
         if not m:
             return None
         mm = int(m.group(1) or 0)
         ss = int(m.group(2) or 0)
-        ms_part = m.group(3) or "0"
-        ms = int(ms_part.ljust(3, "0"))
+        ms_part = m.group(3)
+        # For explicit "ms" suffix treat digits as milliseconds, not a fractional second
+        if ms_part is None or ms_part == "":
+            ms = 0
+        else:
+            try:
+                ms = max(0, int(ms_part[:4]))  # guard against huge values
+            except ValueError:
+                return None
         return ((mm * 60) + ss) * 1000 + ms
     return None
 
@@ -125,7 +157,7 @@ def parse_json_segments(text: str) -> List[Dict[str, Any]]:
             continue
 
         text_val = str(content).strip()
-        if not text_val or end_ms <= start_ms:
+        if not text_val:
             continue
 
         items.append({"start_ms": start_ms, "end_ms": end_ms, "text": text_val})
@@ -146,7 +178,10 @@ def clean_json_text(text: str) -> str:
         e = it["end_ms"]
         t = it["text"]
         if e <= s:
-            s, e = e, s  # swap
+            # Swap and enforce a minimal 1ms duration to keep the segment usable
+            s, e = e, s
+            if e <= s:
+                e = s + 1
         cleaned.append(
             {"start": format_ms_xmys(s), "end": format_ms_xmys(e), "text": t}
         )
@@ -156,24 +191,63 @@ def clean_json_text(text: str) -> str:
 def assemble_srt_from_json_segments(
     segment_outputs: List[str],
     offsets_ms: List[int],
+    durations_ms: Optional[List[int]] = None,
+    log_adjustments: bool = True,
+    monotonic_tolerance_ms: int = 200,
 ) -> str:
-    """Assemble final SRT from JSON segment outputs."""
+    """Assemble final SRT from JSON segment outputs.
+
+    Clamps each segment’s timestamps to its own window and enforces global monotonic order
+    to avoid overlaps/gaps from model drift.
+    """
+    clamp_count = 0
+    monotonic_adjust = 0
     entries: List[Tuple[int, int, str]] = []
     for idx, text in enumerate(segment_outputs):
         items = parse_json_segments(text)
         if not items:
             continue
         off = offsets_ms[idx]
+        dur = None
+        if durations_ms and idx < len(durations_ms):
+            dur = durations_ms[idx]
+        seg_end_cap = off + dur if dur is not None else None
         for it in items:
-            s = it["start_ms"] + off
-            e = it["end_ms"] + off
+            raw_s = it["start_ms"] + off
+            raw_e = it["end_ms"] + off
+            s = raw_s
+            e = raw_e
+            # Clamp to the segment window if known
+            if seg_end_cap is not None:
+                s = max(off, min(s, seg_end_cap))
+                e = max(off, min(e, seg_end_cap))
             if e <= s:
-                continue
+                e = s + 1
+            if (s, e) != (raw_s, raw_e):
+                clamp_count += 1
             entries.append((s, e, it["text"]))
 
     entries.sort(key=lambda t: (t[0], t[1]))
+    monotonic: List[Tuple[int, int, str]] = []
+    prev_end = 0
+    for s, e, c in entries:
+        # Allow small overlaps without pushing forward to preserve timing nuance
+        if s < prev_end - monotonic_tolerance_ms:
+            s_adj = prev_end
+        else:
+            s_adj = s
+        e_adj = max(e, s_adj + 1)
+        if (s_adj, e_adj) != (s, e):
+            monotonic_adjust += 1
+        monotonic.append((s_adj, e_adj, c))
+        prev_end = e_adj
+
     srt_lines = [
         f"{i + 1}\n{ms_to_hhmmssms(s)} --> {ms_to_hhmmssms(e)}\n{c}\n"
-        for i, (s, e, c) in enumerate(entries)
+        for i, (s, e, c) in enumerate(monotonic)
     ]
+    if log_adjustments and (clamp_count or monotonic_adjust):
+        print(
+            f"[ASSEMBLE] adjusted segments: clamp={clamp_count}, monotonic={monotonic_adjust}, total_entries={len(monotonic)}"
+        )
     return "\n".join(srt_lines)

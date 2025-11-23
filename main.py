@@ -17,14 +17,13 @@ DEFAULT_CONFIG_PATH = "config.json"
 @dataclass
 class PipelineConfig:
     """Configuration for the audio processing pipeline."""
-    audio_path: str
+    path_to_vid: str
     source_language: str
     target_language: str
     output_dir: str
     tmp_dir: str
     cleanup: bool
     min_segment_minutes: int
-    segment_overlap_seconds: int
     transcription_models: Optional[List[str]] = None
     translation_models: Optional[List[str]] = None
 
@@ -34,14 +33,13 @@ def load_config(path: str = DEFAULT_CONFIG_PATH) -> PipelineConfig:
         cfg = json.load(f)
 
     return PipelineConfig(
-        audio_path=cfg["audio_path"],
+        path_to_vid=cfg["path_to_vid"],
         source_language=cfg.get("source_language", "Arabic"),
         target_language=cfg.get("target_language", "Spanish"),
         output_dir=cfg.get("output_dir", "output_srt"),
         tmp_dir=cfg.get("tmp_dir", "tmp_segments"),
         cleanup=bool(cfg.get("cleanup", True)),
         min_segment_minutes=int(cfg.get("min_segment_minutes", 15)),
-        segment_overlap_seconds=int(cfg.get("segment_overlap_seconds", 2)),
         transcription_models=cfg.get("transcription_models"),
         translation_models=cfg.get("translation_models"),
     )
@@ -76,7 +74,7 @@ def run_from_config(config_path: str = "config.json") -> None:
         s = s.strip().lower()
         return s.startswith("http://") or s.startswith("https://") or s.startswith("youtu.be/") or s.startswith("www.youtube.com/")
 
-    def _find_latest_run_dir(out_dir: str):
+    def _find_latest_run_dir(out_dir: str, preferred: Optional[str] = None):
         try:
             candidates = []
             for name in os.listdir(out_dir):
@@ -88,18 +86,47 @@ def run_from_config(config_path: str = "config.json") -> None:
                         candidates.append((mtime, p, name))
             if not candidates:
                 return None, None
+            if preferred:
+                for _, run_p, run_name in candidates:
+                    if run_name == preferred:
+                        return run_p, run_name
             candidates.sort(reverse=True)
             _, run_p, run_name = candidates[0]
             return run_p, run_name
         except Exception:
             return None, None
 
+    def _derive_base_name_from_source(src: str) -> str:
+        """Try to derive a deterministic base name from URL or local path."""
+        try:
+            from urllib.parse import urlparse, parse_qs
+        except Exception:
+            urlparse = parse_qs = None  # type: ignore
+
+        if _is_url(src) and urlparse:
+            parsed = urlparse(src)
+            qs = parse_qs(parsed.query)
+            if "v" in qs and qs["v"]:
+                return qs["v"][0]
+            path_bits = [b for b in parsed.path.split("/") if b]
+            if path_bits:
+                return path_bits[-1]
+        return os.path.splitext(os.path.basename(src))[0]
+
+    base_name_hint = _derive_base_name_from_source(path_to_vid)
+
     # Determine whether to resume or start from scratch based on start_step
     if start_step_name in ("transcribe", "translate", "assemble"):
-        run_dir, base_name = _find_latest_run_dir(output_dir)
+        run_dir, base_name = _find_latest_run_dir(output_dir, preferred=base_name_hint)
         if not run_dir:
-            raise RuntimeError("start_step>='transcribe' but no existing run directory with offsets.json found in output_dir")
-        print(f"[DOWNLOAD] resume base={base_name}")
+            raise RuntimeError(
+                "start_step>='transcribe' but no matching run directory with offsets.json found in output_dir "
+                f"(looked for '{base_name_hint}')"
+            )
+        if base_name != base_name_hint:
+            print(f"[DOWNLOAD] resume latest={base_name} (hint was {base_name_hint})")
+        else:
+            print(f"[DOWNLOAD] resume base={base_name}")
     elif _is_url(path_to_vid):
         dl_t0 = time.time()
         print("[DOWNLOAD] start", flush=True)
@@ -185,6 +212,9 @@ def run_from_config(config_path: str = "config.json") -> None:
     translate_max_retries = config.get("translate_max_retries")
     transcribe_retry_wait_s = config.get("transcribe_retry_wait_s")
     translate_retry_wait_s = config.get("translate_retry_wait_s")
+    concurrency = config.get("concurrency")
+    transcribe_max_attempts = config.get("transcribe_max_attempts")
+    translate_max_empty_attempts = config.get("translate_max_empty_attempts")
     
     out_path = process_audio_fixed_duration(
         input_audio=audio_path,
@@ -205,6 +235,9 @@ def run_from_config(config_path: str = "config.json") -> None:
         translate_max_retries=translate_max_retries,
         transcribe_retry_wait_s=transcribe_retry_wait_s,
         translate_retry_wait_s=translate_retry_wait_s,
+        transcribe_max_attempts=transcribe_max_attempts,
+        translate_max_empty_attempts=translate_max_empty_attempts,
+        concurrency=concurrency,
     )
     print(f"SRT: {out_path}")
 

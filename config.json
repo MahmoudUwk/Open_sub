@@ -1,5 +1,5 @@
 {
-  "path_to_vid": "https://www.youtube.com/watch?v=UHCBTk3MbPE",
+  "path_to_vid": "Theblueelephant/TheBlueElephant.mp4",
   "source_language": "Arabic",
   "target_language": "Mexican Spanish",
   "output_dir": "output_srt",
@@ -17,5 +17,6 @@
   "translate_max_retries": 3,
   "transcribe_retry_wait_s": 0,
   "translate_retry_wait_s": 0,
-  "start_step": 0
+  "concurrency": 5,
+  "start_step": 2
 }
