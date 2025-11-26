@@ -243,11 +243,18 @@ def _translate_segments(
             err = to_err
             if to_err == "timeout":
                 timeouts += 1
+                last_err = "timeout"
                 print(
                     f"[TL] {m} attempt {attempt}/{max_retries}: timeout {a_dur:.1f}s",
                     flush=True,
                 )
-                # Always retry on timeout (do not count against max_retries)
+                if timeouts >= max_retries:
+                    return "", {
+                        "attempts": attempts,
+                        "timeouts": timeouts,
+                        "errors": errors,
+                        "last_error": last_err,
+                    }
                 print(
                     f"[TL] wait {translate_retry_wait_s}s before retry...", flush=True
                 )
@@ -345,6 +352,7 @@ def _translate_segments(
             f"Task: Translate each line from {source_language} to {target_language} while keeping meaning precise.\n"
             f"Guidelines:\n"
             f"- Fidelity: Do not summarize or omit any detail. Preserve speaker intent, tone, names, and numbers. If unsure, copy the source text instead of leaving blanks.\n"
+            f"- Multilingual handling: The audio is primarily {source_language}, but other languages may appear. Detect any non-{source_language} text and translate it into {target_language} as well. No line should remain in its original language.\n"
             f"- Alignment: Output the same number of items, in the same order, with no merging or splitting.\n"
             f"- Brevity: Keep lines concise for subtitle timing; avoid adding explanations.\n"
             f"- Format: Return ONLY a valid JSON list of strings (no markdown fences, no keys).\n"
@@ -528,6 +536,11 @@ def process_audio_fixed_duration(
     split_t0 = t0
     print("[SPLIT] start", flush=True)
     total_ms = get_audio_duration_ms(input_audio)
+    if total_ms is None:
+        raise RuntimeError(
+            "Unable to determine audio duration (ffprobe missing or failed). "
+            f"Input: {input_audio}"
+        )
 
     # If offsets.json exists and referenced segment files exist, reuse them
     seg_paths: List[str] = []

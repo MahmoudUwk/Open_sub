@@ -55,7 +55,7 @@ def run_from_config(config_path: str = "config.json") -> None:
     if "translation_fallback_models" in config:
         print("Warning: 'translation_fallback_models' is ignored (fixed retry policy in place).")
 
-    output_dir = config.get("output_dir", "output_srt")
+    output_root = config.get("output_dir", "output_srt")
     verbose = config.get("verbose", False)
     # Numeric start step with mapping for clarity
     start_step_num = int(config.get("start_step", 0))
@@ -63,7 +63,7 @@ def run_from_config(config_path: str = "config.json") -> None:
     start_step_name = steps_map.get(start_step_num, "download")
 
     # Recreate fresh directories (root only); run-specific subdir will be created later
-    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(output_root, exist_ok=True)
     
     path_to_vid = config.get("path_to_vid")
     if not path_to_vid:
@@ -117,7 +117,7 @@ def run_from_config(config_path: str = "config.json") -> None:
 
     # Determine whether to resume or start from scratch based on start_step
     if start_step_name in ("transcribe", "translate", "assemble"):
-        run_dir, base_name = _find_latest_run_dir(output_dir, preferred=base_name_hint)
+        run_dir, base_name = _find_latest_run_dir(output_root, preferred=base_name_hint)
         if not run_dir:
             raise RuntimeError(
                 "start_step>='transcribe' but no matching run directory with offsets.json found in output_dir "
@@ -130,7 +130,7 @@ def run_from_config(config_path: str = "config.json") -> None:
     elif _is_url(path_to_vid):
         dl_t0 = time.time()
         print("[DOWNLOAD] start", flush=True)
-        tmp_download_dir = os.path.join(output_dir, "_downloads")
+        tmp_download_dir = os.path.join(output_root, "_downloads")
         os.makedirs(tmp_download_dir, exist_ok=True)
         local_video_path = download_youtube(path_to_vid, out_dir=tmp_download_dir)
         if not os.path.exists(local_video_path):
@@ -145,7 +145,7 @@ def run_from_config(config_path: str = "config.json") -> None:
     # Compute run directory under output_dir and extract audio there (if not resuming)
     if start_step_name in ("download", "split"):
         base_name = os.path.splitext(os.path.basename(local_video_path))[0]
-        run_dir = os.path.join(output_dir, base_name)
+        run_dir = os.path.join(output_root, base_name)
     os.makedirs(run_dir, exist_ok=True)
     # If the source video was downloaded in THIS run, move it into the run_dir/source_video/
     if start_step_name in ("download", "split") and _is_url(path_to_vid):
@@ -156,7 +156,7 @@ def run_from_config(config_path: str = "config.json") -> None:
             shutil.move(local_video_path, dest_path)
             local_video_path = dest_path
         # Remove empty temporary download directory
-        tmp_download_dir = os.path.join(output_dir, "_downloads")
+        tmp_download_dir = os.path.join(output_root, "_downloads")
         try:
             if os.path.isdir(tmp_download_dir) and not os.listdir(tmp_download_dir):
                 os.rmdir(tmp_download_dir)
@@ -202,7 +202,6 @@ def run_from_config(config_path: str = "config.json") -> None:
     min_segment_minutes = config.get("min_segment_minutes", 15)
     # Use a tmp directory inside the run_dir to keep everything grouped
     tmp_dir = os.path.join(run_dir, config.get("tmp_dir", "tmp_segments"))
-    output_dir = config.get("output_dir", "output_srt")
     cleanup = config.get("cleanup", True)
     transcription_models = config.get("transcription_models") or ["gemini-2.5-pro"]
     translation_models = config.get("translation_models") or ["gemini-2.5-pro"]
@@ -222,7 +221,7 @@ def run_from_config(config_path: str = "config.json") -> None:
         target_language=target_language,
         min_segment_minutes=min_segment_minutes,
         tmp_dir=tmp_dir,
-        output_dir=output_dir,
+        output_dir=output_root,
         cleanup=cleanup,
         verbose=verbose,
         transcription_models=transcription_models,

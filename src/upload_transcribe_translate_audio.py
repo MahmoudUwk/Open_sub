@@ -26,7 +26,8 @@ Output Format: Provide a JSON list of objects strictly adhering to this schema:
 Requirements:
 1. Timestamps: Use the format 'XmYsZms' (e.g., 9m32s839ms). This implies Minutes, Seconds, Milliseconds. Treat the provided audio clip as starting at 0 and keep times within the clip duration, strictly increasing.
 2. Segmentation: Break text into natural subtitle lines (1-2 sentences max). Avoid extremely long segments.
-3. Accuracy: Transcribe exactly what is said.
+3. Accuracy: Transcribe exactly what is said. Do NOT paraphrase, summarize, or omit any spoken line.
+4. Multilingual audio: The primary language is {source_language}, but other languages may appear (e.g., English names/phrases). Preserve each utterance in its original spoken language; do not force everything into one language during transcription.
 4. Reliability: Ensure the JSON is valid and the "start" and "end" keys are present for every segment.
 5. Output: Return ONLY raw JSON (no markdown fences, no explanations).
 """

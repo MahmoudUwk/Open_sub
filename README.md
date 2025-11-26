@@ -51,6 +51,6 @@ output_srt/
 
 ## Reliability notes
 - Timestamp parsing accepts `XmYsZms` and `HH:MM:SS,mmm`.
-- Malformed/empty transcriptions are retried; persistent failures write placeholders (and persist to `raw/`).
-- Translations clamp to each segment’s duration; any overlaps are allowed up to 200 ms before being pushed forward. Assembly logs clamp/monotonic adjustments.
+- Malformed/empty transcriptions are retried; persistent failures write placeholders (and persist to `raw/`). Transcription keeps multilingual utterances in their original language.
+- Translations clamp to each segment’s duration; any overlaps are allowed up to 200 ms before being pushed forward. Multilingual lines are translated to the target language. Assembly logs clamp/monotonic adjustments.
 - Resume expects a run folder named after the video base (with `offsets.json` + durations). If not found or incomplete, a fresh split is performed.

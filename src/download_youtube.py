@@ -98,7 +98,7 @@ def _download_with_python_modules(url: str, out_dir: str) -> Optional[str]:
         # Check produced files
         for ext in ("mp4", "mkv", "webm"):
             candidate = os.path.join(out_dir, f"{vid}.{ext}")
-            if os.path.exists(candidate):
+            if os.path.isfile(candidate) and os.path.getsize(candidate) > 0:
                 return candidate
     except Exception:
         pass
@@ -119,7 +119,7 @@ def _download_with_python_modules(url: str, out_dir: str) -> Optional[str]:
             vid = info.get("id")
         for ext in ("mp4", "mkv", "webm"):
             candidate = os.path.join(out_dir, f"{vid}.{ext}")
-            if os.path.exists(candidate):
+            if os.path.isfile(candidate) and os.path.getsize(candidate) > 0:
                 return candidate
     except Exception:
         pass
@@ -134,8 +134,10 @@ def download_youtube(url: str, out_dir: str = DOWNLOAD_DIR) -> str:
     """
     # Prefer Python modules to avoid Exec format issues
     maybe_path = _download_with_python_modules(url, out_dir)
-    if maybe_path:
+    if maybe_path and os.path.isfile(maybe_path) and os.path.getsize(maybe_path) > 0:
         return maybe_path
+    if maybe_path:
+        print(f"[DOWNLOAD] Ignoring zero-byte artifact from python module: {maybe_path}")
 
     downloader = find_downloader()
     os.makedirs(out_dir, exist_ok=True)

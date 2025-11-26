@@ -1,5 +1,5 @@
 {
-  "path_to_vid": "Theblueelephant/TheBlueElephant.mp4",
+  "path_to_vid": "tmp/TheBlueElephant2.mp4",
   "source_language": "Arabic",
   "target_language": "Mexican Spanish",
   "output_dir": "output_srt",
@@ -18,5 +18,5 @@
   "transcribe_retry_wait_s": 0,
   "translate_retry_wait_s": 0,
   "concurrency": 5,
-  "start_step": 2
+  "start_step": 1
 }
