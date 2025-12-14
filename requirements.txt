@@ -1,0 +1,8 @@
+# Google Generative AI library
+google-genai==0.3.0
+
+# YouTube downloader
+yt-dlp==2023.12.30
+
+# Audio processing
+pydub==0.25.1

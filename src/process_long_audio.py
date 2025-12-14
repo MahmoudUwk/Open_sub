@@ -348,14 +348,32 @@ def _translate_segments(
         json_input = json.dumps(orig_texts, ensure_ascii=False, indent=2)
 
         prompt = (
-            f"Role: Expert subtitle translator for scripted dialogue.\n"
-            f"Task: Translate each line from {source_language} to {target_language} while keeping meaning precise.\n"
-            f"Guidelines:\n"
-            f"- Fidelity: Do not summarize or omit any detail. Preserve speaker intent, tone, names, and numbers. If unsure, copy the source text instead of leaving blanks.\n"
-            f"- Multilingual handling: The audio is primarily {source_language}, but other languages may appear. Detect any non-{source_language} text and translate it into {target_language} as well. No line should remain in its original language.\n"
-            f"- Alignment: Output the same number of items, in the same order, with no merging or splitting.\n"
-            f"- Brevity: Keep lines concise for subtitle timing; avoid adding explanations.\n"
-            f"- Format: Return ONLY a valid JSON list of strings (no markdown fences, no keys).\n"
+            f"SYSTEM: Expert Translator - JSON Output Only\n"
+            f"\n"
+            f"CRITICAL CONSTRAINTS:\n"
+            f"- Output EXACTLY one JSON array - no other text, explanations, or formatting\n"
+            f"- NO conversational responses like \"I cannot translate\" or \"I don't understand\"\n"
+            f"- NO refusals, apologies, or explanations of any kind\n"
+            f"- NO markdown fences, code blocks, or wrappers of any kind\n"
+            f"- If translation is impossible, copy source text exactly instead of refusing\n"
+            f"- NO adding translator notes, confidence scores, or metadata\n"
+            f"\n"
+            f"CORE FUNCTION:\n"
+            f"Translate each line from {source_language} to {target_language} for subtitles.\n"
+            f"\n"
+            f"STRICT OUTPUT FORMAT:\n"
+            f"[\"translated line 1\", \"translated line 2\", ...]\n"
+            f"\n"
+            f"MANDATORY REQUIREMENTS:\n"
+            f"1. FIDELITY: Preserve ALL meaning, intent, tone, names, numbers. Never summarize.\n"
+            f"2. MULTILINGUAL: Translate ALL languages into {target_language}. Leave nothing untranslated.\n"
+            f"3. ALIGNMENT: Same number of items, same order, no merging/splitting.\n"
+            f"4. BREVITY: Keep concise for subtitle timing. No added explanations.\n"
+            f"5. QUALITY: If unsure about translation, copy source text rather than guess.\n"
+            f"\n"
+            f"SYSTEM NOTE:\n"
+            f"This is a system-to-system interface. Any response that is not pure JSON will cause critical failure. Do not add human-readable text.\n"
+            f"\n"
             f"Input list:\n{json_input}\n\n"
             f"Output JSON:\n"
         )
@@ -363,19 +381,47 @@ def _translate_segments(
         # Call models with fixed-interval retries (with fallbacks)
         t0 = time.time()
 
-        def json_validator(text):
+        def enhanced_validator(text):
+            """Enhanced validation with content quality checks."""
             try:
                 data = json.loads(text)
                 if not isinstance(data, list):
                     return False, "not a list"
                 if len(data) != len(orig_texts):
-                    return (
-                        False,
-                        f"count mismatch exp={len(orig_texts)} got={len(data)}",
-                    )
+                    return False, f"count mismatch exp={len(orig_texts)} got={len(data)}"
+                
+                # Content quality checks
+                refusal_patterns = [
+                    "i cannot", "i can't", "i cannot", "i am unable to",
+                    "as an ai model", "as an artificial intelligence",
+                    "i don't understand", "i do not understand",
+                    "sorry, i", "sorry i", "apologies, i", "apologies i",
+                    "unable to translate", "cannot translate",
+                    "i am not able to", "i'm not able to"
+                ]
+                
+                for i, translation in enumerate(data):
+                    if not isinstance(translation, str):
+                        return False, f"item {i} is not a string"
+                    
+                    translation_lower = translation.strip().lower()
+                    
+                    # Check for empty translations
+                    if not translation_lower:
+                        return False, f"empty translation in item {i}"
+                    
+                    # Check for refusal patterns
+                    for pattern in refusal_patterns:
+                        if pattern in translation_lower:
+                            return False, f"refusal pattern detected in item {i}: '{translation}'"
+                    
+                    # Check for excessive length (hallucination indicator)
+                    if len(translation) > len(str(orig_texts[i])) * 4:
+                        return False, f"excessive length in item {i}: {len(translation)} vs {len(str(orig_texts[i]))}"
+                
                 return True, None
-            except json.JSONDecodeError:
-                return False, "invalid json"
+            except json.JSONDecodeError as e:
+                return False, f"invalid json: {e}"
 
         model_order = [model] + [m for m in translation_models if m != model]
         trans_text = ""
@@ -387,7 +433,7 @@ def _translate_segments(
                 cand,
                 prompt,
                 max_retries=translate_max_retries,
-                validator=json_validator,
+                validator=enhanced_validator,
                 postprocess=_strip_code_fences,
                 max_empty_attempts=translate_max_empty_attempts,
                 translate_timeout_s=translate_timeout_s,

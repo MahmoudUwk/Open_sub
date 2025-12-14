@@ -11,13 +11,59 @@ Generate accurate, timestamped subtitles from long videos by downloading (or usi
 - Translation with model fallbacks, per-segment clamping, and monotonic SRT assembly with drift tolerance.
 - Resume from split/transcribe/translate/assemble; concurrency control for faster runs.
 
-## Setup
-1) Activate env: `conda activate ST`
-2) Install deps: `pip install google-generativeai yt-dlp`
-3) Install ffmpeg.
-4) Export `GEMINI_API_KEY` in your shell (no `.env`).
+## Quick Setup
+
+### 1. Create and activate a conda environment
+```bash
+conda create -n OpenTranslate python=3.10 -y
+conda activate OpenTranslate
+```
+
+### 2. Install dependencies
+```bash
+pip install -r requirements.txt
+```
+
+### 3. Install ffmpeg
+```bash
+# Ubuntu/Debian:
+sudo apt-get install ffmpeg
+
+# macOS:
+brew install ffmpeg
+
+# Windows:
+# Download from https://ffmpeg.org/download.html
+```
+
+### 4. Set your Google API key
+```bash
+export GEMINI_API_KEY="your_api_key_here"
+```
+
+## Usage
+
+1. Edit `config.json` to set your video source and languages:
+   ```json
+   {
+     "path_to_vid": "https://www.youtube.com/watch?v=YOUR_VIDEO_ID",
+     "source_language": "Arabic",
+     "target_language": "Mexican Spanish",
+     "output_dir": "output_srt",
+     "min_segment_minutes": 5,
+     "transcription_models": ["gemini-2.5-flash-preview-09-2025"],
+     "translation_models": ["gemini-2.5-flash-preview-09-2025"],
+     "concurrency": 5
+   }
+   ```
+
+2. Run the pipeline:
+   ```bash
+   python main.py
+   ```
 
 ## Configuration (`config.json`)
+
 - `path_to_vid`: YouTube URL or local video path.
 - `source_language` / `target_language`: e.g., "Arabic", "Mexican Spanish".
 - `output_dir`: Root for runs (default `output_srt`).
@@ -34,10 +80,9 @@ Generate accurate, timestamped subtitles from long videos by downloading (or usi
   - 3 translate
   - 4 assemble
 
-## Run
-1) Edit `config.json`.
-2) `conda run -n ST python main.py`
-3) Outputs land in `output_dir/<video_base>/`:
+## Output Structure
+
+Outputs land in `output_dir/<video_base>/`:
 ```
 output_srt/
   <video_base>/
@@ -52,5 +97,5 @@ output_srt/
 ## Reliability notes
 - Timestamp parsing accepts `XmYsZms` and `HH:MM:SS,mmm`.
 - Malformed/empty transcriptions are retried; persistent failures write placeholders (and persist to `raw/`). Transcription keeps multilingual utterances in their original language.
-- Translations clamp to each segment’s duration; any overlaps are allowed up to 200 ms before being pushed forward. Multilingual lines are translated to the target language. Assembly logs clamp/monotonic adjustments.
+- Translations clamp to each segment's duration; any overlaps are allowed up to 200 ms before being pushed forward. Multilingual lines are translated to the target language. Assembly logs clamp/monotonic adjustments.
 - Resume expects a run folder named after the video base (with `offsets.json` + durations). If not found or incomplete, a fresh split is performed.

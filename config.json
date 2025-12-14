@@ -1,6 +1,6 @@
 {
-  "path_to_vid": "tmp/TheBlueElephant2.mp4",
-  "source_language": "Arabic",
+  "path_to_vid": "tmp/SA.mp4",
+  "source_language": "Egyptian Arabic",
   "target_language": "Mexican Spanish",
   "output_dir": "output_srt",
   "tmp_dir": "tmp_segments",

@@ -10,11 +10,12 @@ TIME_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 # Standard SRT-style timestamp: HH:MM:SS,mmm or H:MM:SS.mmm (hours optional)
+# Updated to handle brackets, parentheses, and angle brackets
 TIME_COLON_RE = re.compile(
-    r"^\s*(?:(\d{1,2}):)?(\d{1,2}):(\d{1,2})(?:[.,](\d{1,3}))?\s*$"
+    r'^\s*[\[\(\)<>]?(?:(\d{1,2}):)?(\d{1,2}):(\d{1,2})(?:[.,](\d{1,3}))?[\]\)\)>]?\s*$'
 )
-# MM:SS,mmm short-hand (no hours)
-TIME_MINSEC_RE = re.compile(r"^\s*(\d{1,2}):(\d{2})(?:[.,](\d{1,3}))?\s*$")
+# MM:SS,mmm short-hand (no hours) - updated to handle brackets and parentheses
+TIME_MINSEC_RE = re.compile(r'^\s*[\[\(\)<>]?(\d{1,2}):(\d{2})(?:[.,](\d{1,3}))?[\]\)\)>]?\s*$')
 
 
 def parse_time_value_to_ms(value: Any) -> Optional[int]:
@@ -27,6 +28,12 @@ def parse_time_value_to_ms(value: Any) -> Optional[int]:
     - 839ms
     - 01:02:03,456
     - 02:15.4 (MM:SS.mmm)
+    - [00:01:30] (bracketed)
+    - (00:01:30) (parentheses)
+    - 00:01:30,500 (comma decimal)
+    - 00:01:30.500 (dot decimal)
+    - 1:30 (minutes:seconds)
+    - 30 (seconds only)
     """
     if value is None:
         return None
@@ -37,7 +44,12 @@ def parse_time_value_to_ms(value: Any) -> Optional[int]:
         )
     if isinstance(value, str):
         v = value.strip()
-        # Handle SRT-style colon format first
+        
+        # Handle empty or whitespace-only strings
+        if not v:
+            return None
+        
+        # Try SRT-style colon format first (handles brackets, parentheses, and angle brackets)
         m_colon = TIME_COLON_RE.match(v)
         if m_colon:
             h = int(m_colon.group(1) or 0)
@@ -46,6 +58,8 @@ def parse_time_value_to_ms(value: Any) -> Optional[int]:
             frac = m_colon.group(4) or ""
             ms_frac = int((frac + "000")[:3]) if frac else 0  # treat as fractional seconds
             return ((h * 3600 + m * 60 + s) * 1000) + ms_frac
+        
+        # Try MM:SS format (handles brackets, parentheses, and angle brackets)
         m_minsec = TIME_MINSEC_RE.match(v)
         if m_minsec:
             m = int(m_minsec.group(1) or 0)
@@ -53,22 +67,40 @@ def parse_time_value_to_ms(value: Any) -> Optional[int]:
             frac = m_minsec.group(3) or ""
             ms_frac = int((frac + "000")[:3]) if frac else 0
             return ((m * 60 + s) * 1000) + ms_frac
+        
+        # Try to parse as integer (treat as seconds) - but not empty strings
+        try:
+            # Handle case where it's just a number (treat as seconds)
+            if v.isdigit() or (v.startswith('-') and v[1:].isdigit()):
+                seconds = int(v)
+                if seconds >= 0:
+                    return seconds * 1000
+        except (ValueError, IndexError):
+            pass
 
+        # Try XmYsZms format
         m = TIME_TOKEN_RE.match(v)
-        if not m:
-            return None
-        mm = int(m.group(1) or 0)
-        ss = int(m.group(2) or 0)
-        ms_part = m.group(3)
-        # For explicit "ms" suffix treat digits as milliseconds, not a fractional second
-        if ms_part is None or ms_part == "":
-            ms = 0
-        else:
-            try:
-                ms = max(0, int(ms_part[:4]))  # guard against huge values
-            except ValueError:
-                return None
-        return ((mm * 60) + ss) * 1000 + ms
+        if m:
+            mm = int(m.group(1) or 0)
+            ss = int(m.group(2) or 0)
+            ms_part = m.group(3)
+            # For explicit "ms" suffix treat digits as milliseconds, not a fractional second
+            if ms_part is None or ms_part == "":
+                ms = 0
+            else:
+                try:
+                    ms = max(0, int(ms_part[:4]))  # guard against huge values
+                except ValueError:
+                    return None
+            return ((mm * 60) + ss) * 1000 + ms
+        
+        # Try to extract timestamp from malformed brackets or other wrappers
+        # Strip common wrapper characters and retry
+        stripped = v.strip('[](){}"\'<>')
+        if stripped != v:
+            return parse_time_value_to_ms(stripped)
+        
+        return None
     return None
 
 
@@ -193,7 +225,7 @@ def assemble_srt_from_json_segments(
     offsets_ms: List[int],
     durations_ms: Optional[List[int]] = None,
     log_adjustments: bool = True,
-    monotonic_tolerance_ms: int = 200,
+    monotonic_tolerance_ms: int = 50,  # Reduced from 200ms for better precision
 ) -> str:
     """Assemble final SRT from JSON segment outputs.
 
@@ -207,25 +239,46 @@ def assemble_srt_from_json_segments(
         items = parse_json_segments(text)
         if not items:
             continue
-        off = offsets_ms[idx]
-        dur = None
+            
+        segment_offset = offsets_ms[idx]
+        segment_duration = None
         if durations_ms and idx < len(durations_ms):
-            dur = durations_ms[idx]
-        seg_end_cap = off + dur if dur is not None else None
+            segment_duration = durations_ms[idx]
+            
+        # Calculate segment boundaries in global time
+        segment_start_global = segment_offset
+        segment_end_global = segment_offset + segment_duration if segment_duration is not None else None
         for it in items:
-            raw_s = it["start_ms"] + off
-            raw_e = it["end_ms"] + off
-            s = raw_s
-            e = raw_e
-            # Clamp to the segment window if known
-            if seg_end_cap is not None:
-                s = max(off, min(s, seg_end_cap))
-                e = max(off, min(e, seg_end_cap))
-            if e <= s:
-                e = s + 1
-            if (s, e) != (raw_s, raw_e):
+            # CRITICAL FIX: These are RELATIVE timestamps within the segment
+            # They need to be converted to global time by adding the segment offset
+            relative_start = it["start_ms"]
+            relative_end = it["end_ms"]
+            
+            # Convert to global timestamps
+            global_start = segment_offset + relative_start
+            global_end = segment_offset + relative_end
+            
+            # Store original for comparison
+            original_start, original_end = global_start, global_end
+            
+            # CRITICAL FIX: Disable problematic clamping for normal operation
+            # Only apply minimum duration enforcement, no boundary clamping
+            # This prevents the content destruction we were seeing
+            
+            # Only ensure minimum duration - that's it. No boundary clamping.
+            if global_end <= global_start:
+                global_end = global_start + 1000  # 1 second minimum
+                clamp_count += 1  # Track that we applied minimum duration
+                    
+            # Ensure minimum duration for usability
+            if global_end <= global_start:
+                global_end = global_start + 1000  # 1 second minimum
+                
+            # Track adjustments for logging
+            if (global_start, global_end) != (original_start, original_end):
                 clamp_count += 1
-            entries.append((s, e, it["text"]))
+                
+            entries.append((global_start, global_end, it["text"]))
 
     entries.sort(key=lambda t: (t[0], t[1]))
     monotonic: List[Tuple[int, int, str]] = []
