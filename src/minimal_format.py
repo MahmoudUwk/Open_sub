@@ -5,17 +5,26 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 # Strict token: optional minutes, optional seconds, optional milliseconds
+# Strict token: optional minutes, optional seconds, optional milliseconds
 TIME_TOKEN_RE = re.compile(
-    r"^\s*(?:(\d+)\s*m)?\s*(?:(\d{1,2})\s*s)?\s*(?:(\d{1,3})\s*ms)?\s*$",
+    r"^\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?\s*(?:(\d+)\s*ms)?\s*$",
     re.IGNORECASE,
 )
+# New Compact Format Regex: [Start - End] Text
+# Matches: [0m0s214ms - 0m2s174ms] Some text here
+COMPACT_SEGMENT_RE = re.compile(
+    r"^\s*\[\s*([a-zA-Z0-9\s:.,]+)\s*-\s*([a-zA-Z0-9\s:.,]+)\s*\]\s*(.+)$", re.MULTILINE
+)
+
 # Standard SRT-style timestamp: HH:MM:SS,mmm or H:MM:SS.mmm (hours optional)
 # Updated to handle brackets, parentheses, and angle brackets
 TIME_COLON_RE = re.compile(
-    r'^\s*[\[\(\)<>]?(?:(\d{1,2}):)?(\d{1,2}):(\d{1,2})(?:[.,](\d{1,3}))?[\]\)\)>]?\s*$'
+    r"^\s*[\[\(\)<>]?(?:(\d{1,2}):)?(\d{1,2}):(\d{1,2})(?:[.,](\d{1,3}))?[\]\)\)>]?\s*$"
 )
 # MM:SS,mmm short-hand (no hours) - updated to handle brackets and parentheses
-TIME_MINSEC_RE = re.compile(r'^\s*[\[\(\)<>]?(\d{1,2}):(\d{2})(?:[.,](\d{1,3}))?[\]\)\)>]?\s*$')
+TIME_MINSEC_RE = re.compile(
+    r"^\s*[\[\(\)<>]?(\d{1,2}):(\d{2})(?:[.,](\d{1,3}))?[\]\)\)>]?\s*$"
+)
 
 
 def parse_time_value_to_ms(value: Any) -> Optional[int]:
@@ -44,11 +53,11 @@ def parse_time_value_to_ms(value: Any) -> Optional[int]:
         )
     if isinstance(value, str):
         v = value.strip()
-        
+
         # Handle empty or whitespace-only strings
         if not v:
             return None
-        
+
         # Try SRT-style colon format first (handles brackets, parentheses, and angle brackets)
         m_colon = TIME_COLON_RE.match(v)
         if m_colon:
@@ -56,9 +65,11 @@ def parse_time_value_to_ms(value: Any) -> Optional[int]:
             m = int(m_colon.group(2) or 0)
             s = int(m_colon.group(3) or 0)
             frac = m_colon.group(4) or ""
-            ms_frac = int((frac + "000")[:3]) if frac else 0  # treat as fractional seconds
+            ms_frac = (
+                int((frac + "000")[:3]) if frac else 0
+            )  # treat as fractional seconds
             return ((h * 3600 + m * 60 + s) * 1000) + ms_frac
-        
+
         # Try MM:SS format (handles brackets, parentheses, and angle brackets)
         m_minsec = TIME_MINSEC_RE.match(v)
         if m_minsec:
@@ -67,11 +78,11 @@ def parse_time_value_to_ms(value: Any) -> Optional[int]:
             frac = m_minsec.group(3) or ""
             ms_frac = int((frac + "000")[:3]) if frac else 0
             return ((m * 60 + s) * 1000) + ms_frac
-        
+
         # Try to parse as integer (treat as seconds) - but not empty strings
         try:
             # Handle case where it's just a number (treat as seconds)
-            if v.isdigit() or (v.startswith('-') and v[1:].isdigit()):
+            if v.isdigit() or (v.startswith("-") and v[1:].isdigit()):
                 seconds = int(v)
                 if seconds >= 0:
                     return seconds * 1000
@@ -93,13 +104,13 @@ def parse_time_value_to_ms(value: Any) -> Optional[int]:
                 except ValueError:
                     return None
             return ((mm * 60) + ss) * 1000 + ms
-        
+
         # Try to extract timestamp from malformed brackets or other wrappers
         # Strip common wrapper characters and retry
-        stripped = v.strip('[](){}"\'<>')
+        stripped = v.strip("[](){}\"'<>")
         if stripped != v:
             return parse_time_value_to_ms(stripped)
-        
+
         return None
     return None
 
@@ -124,6 +135,7 @@ def format_ms_xmys(total_ms: int) -> str:
     ms = total_ms % 1000
     total_sec = total_ms // 1000
     s = total_sec % 60
+    total_min = total_sec // 60
     m = total_sec // 60
     parts: List[str] = []
     if m:
@@ -198,36 +210,109 @@ def parse_json_segments(text: str) -> List[Dict[str, Any]]:
     return items
 
 
-def clean_json_text(text: str) -> str:
-    """Validate and fix JSON transcript/translation.
+def parse_compact_segments(text: str) -> List[Dict[str, Any]]:
+    """Parse segments in format: [Start - End] Text
 
-    Re-emits valid JSON list.
+    Example:
+    [0m0s214ms - 0m2s174ms] Hello world
     """
-    items = parse_json_segments(text)
-    cleaned: List[Dict[str, str]] = []
+    items: List[Dict[str, Any]] = []
+    text = text.strip()
+    if not text:
+        return []
+
+    # Strip markdown code blocks if present
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+
+    # Try parsing line by line
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+
+        m = COMPACT_SEGMENT_RE.match(line)
+        if m:
+            start_str, end_str, content = m.groups()
+            start_ms = parse_time_value_to_ms(start_str)
+            end_ms = parse_time_value_to_ms(end_str)
+
+            if start_ms is not None and end_ms is not None and content:
+                items.append(
+                    {"start_ms": start_ms, "end_ms": end_ms, "text": content.strip()}
+                )
+
+    return items
+
+
+def parse_any_segments(text: str) -> List[Dict[str, Any]]:
+    """Try to parse as compact format first, then fallback to JSON."""
+    # Heuristic: does it look like JSON?
+    stripped = text.strip()
+    if stripped.startswith("[") and (stripped.endswith("]") or "{" in stripped):
+        # Try JSON first
+        try:
+            items = parse_json_segments(stripped)
+            if items:
+                return items
+        except Exception:
+            pass
+
+    # Try compact format
+    items = parse_compact_segments(stripped)
+    if items:
+        return items
+
+    # Fallback to JSON if compact failed (maybe it was malformed JSON)
+    return parse_json_segments(stripped)
+
+
+def clean_segment_text(text: str) -> str:
+    """Validate and normalize segment text to the new compact format.
+
+    Output format:
+    [XmYsZms - XmYsZms] Text
+    """
+    items = parse_any_segments(text)
+    lines: List[str] = []
+
     for it in items:
         s = it["start_ms"]
         e = it["end_ms"]
         t = it["text"]
+
         if e <= s:
             # Swap and enforce a minimal 1ms duration to keep the segment usable
             s, e = e, s
             if e <= s:
                 e = s + 1
-        cleaned.append(
-            {"start": format_ms_xmys(s), "end": format_ms_xmys(e), "text": t}
-        )
-    return json.dumps(cleaned, ensure_ascii=False, indent=2)
+
+        # Format as compact string
+        start_fmt = format_ms_xmys(s)
+        end_fmt = format_ms_xmys(e)
+        lines.append(f"[{start_fmt} - {end_fmt}] {t}")
+
+    return "\n".join(lines)
 
 
-def assemble_srt_from_json_segments(
+# Alias for backward compatibility if needed, but we should update callers
+clean_json_text = clean_segment_text
+
+
+def assemble_srt_from_segments(
     segment_outputs: List[str],
     offsets_ms: List[int],
     durations_ms: Optional[List[int]] = None,
     log_adjustments: bool = True,
-    monotonic_tolerance_ms: int = 50,  # Reduced from 200ms for better precision
+    monotonic_tolerance_ms: int = 50,
+    max_segment_length_ms: int = 30000,  # Cap individual subtitle lines to 30s to prevent hangs
 ) -> str:
-    """Assemble final SRT from JSON segment outputs.
+    """Assemble final SRT from segment outputs (compact or JSON).
 
     Clamps each segment’s timestamps to its own window and enforces global monotonic order
     to avoid overlaps/gaps from model drift.
@@ -235,63 +320,80 @@ def assemble_srt_from_json_segments(
     clamp_count = 0
     monotonic_adjust = 0
     entries: List[Tuple[int, int, str]] = []
+
     for idx, text in enumerate(segment_outputs):
-        items = parse_json_segments(text)
+        items = parse_any_segments(text)
         if not items:
             continue
-            
+
         segment_offset = offsets_ms[idx]
-        segment_duration = None
-        if durations_ms and idx < len(durations_ms):
-            segment_duration = durations_ms[idx]
-            
-        # Calculate segment boundaries in global time
-        segment_start_global = segment_offset
-        segment_end_global = segment_offset + segment_duration if segment_duration is not None else None
+        # segment_duration not strictly used for validation here, but could be
+
         for it in items:
             # CRITICAL FIX: These are RELATIVE timestamps within the segment
             # They need to be converted to global time by adding the segment offset
             relative_start = it["start_ms"]
             relative_end = it["end_ms"]
-            
+
             # Convert to global timestamps
             global_start = segment_offset + relative_start
             global_end = segment_offset + relative_end
-            
+
             # Store original for comparison
             original_start, original_end = global_start, global_end
-            
-            # CRITICAL FIX: Disable problematic clamping for normal operation
-            # Only apply minimum duration enforcement, no boundary clamping
-            # This prevents the content destruction we were seeing
-            
-            # Only ensure minimum duration - that's it. No boundary clamping.
+
+            # Ensure minimum duration
             if global_end <= global_start:
                 global_end = global_start + 1000  # 1 second minimum
-                clamp_count += 1  # Track that we applied minimum duration
-                    
-            # Ensure minimum duration for usability
-            if global_end <= global_start:
-                global_end = global_start + 1000  # 1 second minimum
-                
-            # Track adjustments for logging
-            if (global_start, global_end) != (original_start, original_end):
-                clamp_count += 1
-                
+
             entries.append((global_start, global_end, it["text"]))
 
     entries.sort(key=lambda t: (t[0], t[1]))
     monotonic: List[Tuple[int, int, str]] = []
     prev_end = 0
+
     for s, e, c in entries:
-        # Allow small overlaps without pushing forward to preserve timing nuance
-        if s < prev_end - monotonic_tolerance_ms:
-            s_adj = prev_end
+        # 1. Cap excessive duration (e.g. 5 minutes for one word)
+        # This is a common cause of "hanging" subtitles
+        if (e - s) > max_segment_length_ms:
+            e = s + max_segment_length_ms
+            clamp_count += 1
+
+        # 2. Strict Monotonicity with Priority to Current Start
+        # If the current line starts BEFORE the previous ended, we have an overlap.
+        # Strategy:
+        # - If overlap is small (within tolerance), push Start forward (standard sync)
+        # - If overlap is LARGE (bad model timing), CLAMP the PREVIOUS end instead of delaying current.
+        #   Delaying current indefinitely is what causes "hanging" (one bad segment pushes everything else)
+
+        if s < prev_end:
+            overlap = prev_end - s
+            if (
+                overlap > 2000
+            ):  # If overlap is > 2 seconds, assume previous segment ran too long
+                # Fix previous segment in the 'monotonic' list if possible
+                if monotonic:
+                    last_s, last_e, last_c = monotonic[-1]
+                    # Cap the last one to end where this one starts
+                    # But don't make it shorter than 100ms if possible
+                    new_last_e = max(last_s + 100, s)
+                    monotonic[-1] = (last_s, new_last_e, last_c)
+                    prev_end = new_last_e
+                    monotonic_adjust += 1
+
+                # Now take s as is (or max(s, prev_end))
+                s_adj = max(s, prev_end)
+            else:
+                # Small overlap, just push current start forward
+                s_adj = prev_end
         else:
             s_adj = s
-        e_adj = max(e, s_adj + 1)
+
+        e_adj = max(e, s_adj + 100)  # Ensure at least 100ms duration
+
         if (s_adj, e_adj) != (s, e):
             monotonic_adjust += 1
+
         monotonic.append((s_adj, e_adj, c))
         prev_end = e_adj
 
@@ -299,8 +401,13 @@ def assemble_srt_from_json_segments(
         f"{i + 1}\n{ms_to_hhmmssms(s)} --> {ms_to_hhmmssms(e)}\n{c}\n"
         for i, (s, e, c) in enumerate(monotonic)
     ]
+
     if log_adjustments and (clamp_count or monotonic_adjust):
         print(
             f"[ASSEMBLE] adjusted segments: clamp={clamp_count}, monotonic={monotonic_adjust}, total_entries={len(monotonic)}"
         )
     return "\n".join(srt_lines)
+
+
+# Module-level alias for backward compatibility
+assemble_srt_from_json_segments = assemble_srt_from_segments

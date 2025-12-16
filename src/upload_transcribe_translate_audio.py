@@ -17,19 +17,21 @@ RATE_LIMIT_ERRORS = (
 )
 
 TRANSCRIPTION_PROMPT_TEMPLATE = """Role: Expert Movie Transcriber.
-Task: Transcribe the speech in {source_language} accurately, capturing dialogue for subtitles.
-Output Format: Provide a JSON list of objects strictly adhering to this schema:
-[
-  {{"start": "XmYsZms", "end": "XmYsZms", "text": "..."}},
-  ...
-]
+Task: Create an enriched, fine-grained, amazing transcription of the speech in {source_language}. Capture every nuance of the dialogue for high-quality subtitles.
+
+Output Format:
+[XmYsZms - XmYsZms] Spoken text
+
+Example:
+[0m0s214ms - 0m2s174ms] I don't think so.
+[0m2s314ms - 0m3s864ms] Wait, did you hear that?
+
 Requirements:
-1. Timestamps: Use the format 'XmYsZms' (e.g., 9m32s839ms). This implies Minutes, Seconds, Milliseconds. Treat the provided audio clip as starting at 0 and keep times within the clip duration, strictly increasing.
-2. Segmentation: Break text into natural subtitle lines (1-2 sentences max). Avoid extremely long segments.
-3. Accuracy: Transcribe exactly what is said. Do NOT paraphrase, summarize, or omit any spoken line.
-4. Multilingual audio: The primary language is {source_language}, but other languages may appear (e.g., English names/phrases). Preserve each utterance in its original spoken language; do not force everything into one language during transcription.
-4. Reliability: Ensure the JSON is valid and the "start" and "end" keys are present for every segment.
-5. Output: Return ONLY raw JSON (no markdown fences, no explanations).
+1. Format: Use the strict `[Start - End] Text` format for every line. Start and End must be in XmYsZms format (e.g., 9m32s839ms).
+2. Accuracy & Nuance: Transcribe exactly what is said. Capture stuttering, interruptions, and emotional tone if relevant to the dialogue (e.g., [whispering], [screaming] if helpful for context, but primarily focus on the spoken words).
+3. Segmentation: Break text into natural subtitle lines (1-2 sentences max). Keep segments short and rhythmic for easy reading.
+4. Multilingual: The primary language is {source_language}, but preserve any other spoken languages as they are (or transliterate if necessary for the target audience).
+5. Reliability: Output ONLY the transcription lines. No markdown, no JSON, no introductory text.
 """
 
 

@@ -8,7 +8,7 @@ client = genai.Client()
 start_time = time.time()
 
 response = client.models.generate_content(
-    model="gemini-2.5-flash", contents="Hello Gemini"
+    model="gemma-3-27b", contents="Hello Gemini"
 )
 
 end_time = time.time()

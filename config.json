@@ -6,11 +6,11 @@
   "tmp_dir": "tmp_segments",
   "cleanup": false,
   "transcription_models": [
-    "gemini-2.5-flash-preview-09-2025"
+    "gemini-2.5-flash-lite-preview-09-2025"
   ],
-  "min_segment_minutes": 5,
+  "min_segment_minutes": 10,
   "translation_models": [
-    "gemini-2.5-flash-preview-09-2025"
+    "gemini-2.5-flash-lite-preview-09-2025"
   ],
   "transcribe_timeout_s": 150,
   "translate_timeout_s": 120,
@@ -18,5 +18,5 @@
   "transcribe_retry_wait_s": 0,
   "translate_retry_wait_s": 0,
   "concurrency": 5,
-  "start_step": 1
+  "start_step": 3
 }

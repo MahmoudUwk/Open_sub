@@ -12,10 +12,11 @@ import google.genai as genai
 from .audio_utils import split_audio_by_duration
 from .upload_transcribe_translate_audio import transcribe_minimal, RATE_LIMIT_ERRORS
 from .minimal_format import (
-    assemble_srt_from_json_segments,
-    clean_json_text,
-    parse_json_segments,
+    assemble_srt_from_segments,
+    clean_segment_text,
+    parse_any_segments,
     format_ms_xmys,
+    parse_compact_segments,
 )
 from .audio_utils import get_audio_duration_ms
 
@@ -113,12 +114,14 @@ def _transcribe_segments(
                     continue
 
                 try:
-                    cleaned = clean_json_text(str(outcome))
-                    parsed = parse_json_segments(cleaned)
+                    cleaned = clean_segment_text(str(outcome))
+                    parsed = parse_any_segments(cleaned)
                     if not parsed:
                         raise ValueError("parsed entries empty")
                 except Exception as e:
-                    print(f"[TR] seg {idx} invalid json {duration:.1f}s: {e}", flush=True)
+                    print(
+                        f"[TR] seg {idx} invalid json {duration:.1f}s: {e}", flush=True
+                    )
                     time.sleep(transcribe_retry_wait_s)
                     continue
 
@@ -138,7 +141,9 @@ def _transcribe_segments(
                     "text": "[untranscribed]",
                 }
             ]
-            cleaned = json.dumps(placeholder, ensure_ascii=False, indent=2)
+            cleaned = clean_segment_text(
+                json.dumps(placeholder)
+            )  # Re-use cleaner to format placeholder as compact
             minimal_outputs[idx] = cleaned
             raw_path = os.path.join(output_dir, "raw", f"segment_{idx}_raw.txt")
             try:
@@ -335,47 +340,43 @@ def _translate_segments(
 
         model = translation_models[i % len(translation_models)]
 
-        # Parse JSON to extract text for translation
-        items = parse_json_segments(clean_json_text(out))
-        orig_texts = [it["text"] for it in items]
-        time_pairs = [(int(it["start_ms"]), int(it["end_ms"])) for it in items]
-        seg_cap = None
-        if segment_durations_ms and i < len(segment_durations_ms):
-            seg_cap = int(segment_durations_ms[i])
+        # Parse compact segments to extract text for translation
+        # Input format: [Start - End] Text
+        items = parse_any_segments(clean_segment_text(out))
+        if not items:
+            translated_outputs[i] = ""
+            return
 
-        # Prepare JSON input for translation
-        # We send a list of strings to translate
-        json_input = json.dumps(orig_texts, ensure_ascii=False, indent=2)
+        # Prepare Input as [Start - End] Text
+        # We send the timestamps too so the model mimics the structure
+        input_lines = []
+        for it in items:
+            s_fmt = format_ms_xmys(it["start_ms"])
+            e_fmt = format_ms_xmys(it["end_ms"])
+            input_lines.append(f"[{s_fmt} - {e_fmt}] {it['text']}")
+
+        block_input = "\n".join(input_lines)
 
         prompt = (
-            f"SYSTEM: Expert Translator - JSON Output Only\n"
+            f"Role: Expert Translator.\n"
+            f"Task: Translate the subtitles from {source_language} to {target_language}.\n"
+            f"Context: Enriched, fine-grained, amazing movie transcription.\n"
             f"\n"
-            f"CRITICAL CONSTRAINTS:\n"
-            f"- Output EXACTLY one JSON array - no other text, explanations, or formatting\n"
-            f"- NO conversational responses like \"I cannot translate\" or \"I don't understand\"\n"
-            f"- NO refusals, apologies, or explanations of any kind\n"
-            f"- NO markdown fences, code blocks, or wrappers of any kind\n"
-            f"- If translation is impossible, copy source text exactly instead of refusing\n"
-            f"- NO adding translator notes, confidence scores, or metadata\n"
+            f"Input Format:\n"
+            f"[Start - End] Source Text\n"
             f"\n"
-            f"CORE FUNCTION:\n"
-            f"Translate each line from {source_language} to {target_language} for subtitles.\n"
+            f"Output Format:\n"
+            f"[Start - End] Translated Text\n"
             f"\n"
-            f"STRICT OUTPUT FORMAT:\n"
-            f"[\"translated line 1\", \"translated line 2\", ...]\n"
+            f"Requirements:\n"
+            f"1. PRESERVE TIMESTAMPS: You must keep the exact same [Start - End] tags for each line.\n"
+            f"2. FIDELITY: Preserve meaning, tone, and nuance. Translate everything.\n"
+            f"3. STRICT FORMAT: Output line-by-line corresponding to input. No extra text, no markdown.\n"
             f"\n"
-            f"MANDATORY REQUIREMENTS:\n"
-            f"1. FIDELITY: Preserve ALL meaning, intent, tone, names, numbers. Never summarize.\n"
-            f"2. MULTILINGUAL: Translate ALL languages into {target_language}. Leave nothing untranslated.\n"
-            f"3. ALIGNMENT: Same number of items, same order, no merging/splitting.\n"
-            f"4. BREVITY: Keep concise for subtitle timing. No added explanations.\n"
-            f"5. QUALITY: If unsure about translation, copy source text rather than guess.\n"
+            f"Input:\n"
+            f"{block_input}\n"
             f"\n"
-            f"SYSTEM NOTE:\n"
-            f"This is a system-to-system interface. Any response that is not pure JSON will cause critical failure. Do not add human-readable text.\n"
-            f"\n"
-            f"Input list:\n{json_input}\n\n"
-            f"Output JSON:\n"
+            f"Output:\n"
         )
 
         # Call models with fixed-interval retries (with fallbacks)
@@ -383,45 +384,30 @@ def _translate_segments(
 
         def enhanced_validator(text):
             """Enhanced validation with content quality checks."""
-            try:
-                data = json.loads(text)
-                if not isinstance(data, list):
-                    return False, "not a list"
-                if len(data) != len(orig_texts):
-                    return False, f"count mismatch exp={len(orig_texts)} got={len(data)}"
-                
-                # Content quality checks
-                refusal_patterns = [
-                    "i cannot", "i can't", "i cannot", "i am unable to",
-                    "as an ai model", "as an artificial intelligence",
-                    "i don't understand", "i do not understand",
-                    "sorry, i", "sorry i", "apologies, i", "apologies i",
-                    "unable to translate", "cannot translate",
-                    "i am not able to", "i'm not able to"
-                ]
-                
-                for i, translation in enumerate(data):
-                    if not isinstance(translation, str):
-                        return False, f"item {i} is not a string"
-                    
-                    translation_lower = translation.strip().lower()
-                    
-                    # Check for empty translations
-                    if not translation_lower:
-                        return False, f"empty translation in item {i}"
-                    
-                    # Check for refusal patterns
-                    for pattern in refusal_patterns:
-                        if pattern in translation_lower:
-                            return False, f"refusal pattern detected in item {i}: '{translation}'"
-                    
-                    # Check for excessive length (hallucination indicator)
-                    if len(translation) > len(str(orig_texts[i])) * 4:
-                        return False, f"excessive length in item {i}: {len(translation)} vs {len(str(orig_texts[i]))}"
-                
-                return True, None
-            except json.JSONDecodeError as e:
-                return False, f"invalid json: {e}"
+            # Parse back using compact parser
+            parsed = parse_compact_segments(text)
+            if not parsed:
+                return False, "failed to parse any segments"
+
+            # permissive count check (allow slight drift if model merged lines, but warn)
+            if abs(len(parsed) - len(items)) > max(2, len(items) * 0.2):
+                return (
+                    False,
+                    f"count mismatch severe: in={len(items)} out={len(parsed)}",
+                )
+
+            # Refusal checks
+            refusal_patterns = [
+                "i cannot",
+                "prioritize the spoken words",
+                "as an ai",
+                "i am unable",
+            ]
+            lower = text.lower()
+            if any(p in lower for p in refusal_patterns) and len(parsed) < 3:
+                return False, "potential refusal detected"
+
+            return True, None
 
         model_order = [model] + [m for m in translation_models if m != model]
         trans_text = ""
@@ -444,86 +430,56 @@ def _translate_segments(
                 break
         dur = time.time() - t0
 
-        translated_lines_raw = []
-        used_source_fallback = False
+        # Parse the translated output
+        translated_items = parse_compact_segments(trans_text)
 
-        if trans_text.strip():
-            try:
-                translated_lines_raw = json.loads(trans_text)
-            except Exception as e:
-                if verbose:
-                    print(f"[TL] seg {i} parse error on {chosen_model}: {e}")
-                translated_lines_raw = list(orig_texts)
-                used_source_fallback = True
+        # Fallback if empty
+        if not translated_items:
+            if verbose:
+                print(f"[TL] seg {i} parse fail on {chosen_model}, fallback to source")
+            # Re-construct source as fallback
+            translated_items = items
+            used_src = True
         else:
-            translated_lines_raw = list(orig_texts)
-            used_source_fallback = True
+            used_src = False
 
-        # Align counts
-        if len(translated_lines_raw) < len(orig_texts):
-            translated_lines_raw += orig_texts[len(translated_lines_raw) :]
+        # Re-serialize to clean format
+        # We don't need complex alignment logic anymore because we asked the model to preserve timestamps.
+        # But if the model messed up timestamps, we might want to force-align to original timestamps?
+        # Let's trust the model's preservation for now, but if counts match exactly, we could overlay original timestamps.
+        # Actually, let's overlay original timestamps if counts match exactly to ensure perfect sync.
+
+        final_lines = []
+        if len(translated_items) == len(items):
+            # Perfect match, enforce original timing
+            for src_it, tr_it in zip(items, translated_items):
+                s_fmt = format_ms_xmys(src_it["start_ms"])
+                e_fmt = format_ms_xmys(src_it["end_ms"])
+                final_lines.append(f"[{s_fmt} - {e_fmt}] {tr_it['text']}")
         else:
-            translated_lines_raw = translated_lines_raw[: len(orig_texts)]
+            # Count mismatch, use model's timing (it might have merged/split)
+            for tr_it in translated_items:
+                s_fmt = format_ms_xmys(tr_it["start_ms"])
+                e_fmt = format_ms_xmys(tr_it["end_ms"])
+                final_lines.append(f"[{s_fmt} - {e_fmt}] {tr_it['text']}")
 
-        safe_texts = []
-        for src, t_line in zip(orig_texts, translated_lines_raw):
-            cleaned = str(t_line).strip()
-            if not cleaned:
-                cleaned = src.strip()
-            safe_texts.append(cleaned)
-
-        reconstructed = []
-        for (s, e), t_line in zip(time_pairs, safe_texts):
-            if seg_cap is not None:
-                s = max(0, min(s, seg_cap))
-                e = max(0, min(e, seg_cap))
-            if e <= s:
-                e = s + 1
-            if seg_cap is not None and e > seg_cap:
-                e = seg_cap
-            reconstructed.append(
-                {
-                    "start": format_ms_xmys(s),
-                    "end": format_ms_xmys(e),
-                    "text": t_line,
-                }
-            )
-
-        cleaned_t = json.dumps(reconstructed, ensure_ascii=False, indent=2)
+        cleaned_t = "\n".join(final_lines)
         translated_outputs[i] = cleaned_t
+
         translated_path = os.path.join(
             output_dir, "translated", f"segment_{i}_translated.txt"
         )
         with open(translated_path, "w", encoding="utf-8") as f:
             f.write(cleaned_t)
 
-        last_err = stats.get("last_error") if isinstance(stats, dict) else None
-        err_low = last_err.lower() if isinstance(last_err, str) else ""
-        rate_limited = (
-            any(k.lower() in err_low for k in RATE_LIMIT_ERRORS) if last_err else False
+        print(
+            f"[TL] seg {i} ok {dur:.1f}s attempts={total_attempts} items={len(translated_items)}"
         )
-        if used_source_fallback:
-            tag = "rate_limit" if rate_limited else "fallback-source"
-            snippet = (
-                (err_low[:120] + "...")
-                if isinstance(err_low, str) and len(err_low) > 120
-                else (err_low or "")
-            )
-            print(
-                f"[TL] seg {i} {tag} {dur:.1f}s attempts={total_attempts} "
-                f"timeouts={stats.get('timeouts', 0) if stats else 0} "
-                f"errors={stats.get('errors', 0) if stats else 0} last_err={snippet!r}"
-            )
-        else:
-            extra = ""
-            if chosen_model and chosen_model != model:
-                extra = f" (fallback model {chosen_model})"
-            print(
-                f"[TL] seg {i} ok {dur:.1f}s attempts={total_attempts}{extra}"
-            )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = [pool.submit(_translate_one, i, out) for i, out in enumerate(minimal_outputs)]
+        futures = [
+            pool.submit(_translate_one, i, out) for i, out in enumerate(minimal_outputs)
+        ]
         concurrent.futures.wait(futures)
 
     return translated_outputs
@@ -671,7 +627,9 @@ def process_audio_fixed_duration(
     ):
         raise RuntimeError("Segmenting failed: missing or tiny segment files")
     print(f"[SPLIT] ready {len(seg_paths)} segs {(time.time() - split_t0):.1f}s")
-    durations_available = bool(seg_durations_ms) and len(seg_durations_ms) == len(seg_paths)
+    durations_available = bool(seg_durations_ms) and len(seg_durations_ms) == len(
+        seg_paths
+    )
     if not durations_available and verbose:
         print("[SPLIT] warning: segment durations missing; assembly clamping disabled")
 
@@ -702,7 +660,7 @@ def process_audio_fixed_duration(
                 with open(raw_path, "r", encoding="utf-8") as f:
                     raw_text = f.read()
                 if raw_text.strip():
-                    minimal_outputs.append(clean_json_text(raw_text))
+                    minimal_outputs.append(clean_segment_text(raw_text))
                 else:
                     print(f"[TRANSCRIBE] seg {i} missing/empty raw; using placeholder")
                     minimal_outputs.append(placeholder)
@@ -738,7 +696,7 @@ def process_audio_fixed_duration(
             )
             try:
                 with open(t_path, "r", encoding="utf-8") as f:
-                    translated_outputs.append(clean_json_text(f.read()))
+                    translated_outputs.append(clean_segment_text(f.read()))
             except Exception:
                 translated_outputs.append("")
     else:
@@ -768,7 +726,7 @@ def process_audio_fixed_duration(
         print("[ASSEMBLE] skip (existing SRT)", flush=True)
     else:
         print("[ASSEMBLE] start", flush=True)
-        srt_text = assemble_srt_from_json_segments(
+        srt_text = assemble_srt_from_segments(
             translated_outputs,
             offsets_ms,
             seg_durations_ms if durations_available else None,
